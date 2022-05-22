@@ -48,8 +48,8 @@ def tofts(ktrans, kep, t0, time, aif_time, aif_cp):
     # normalize to [-1, 1]
     gridx = gridx / (t2 - 1) * 2 -1
     gridy = gridy / (h * w - 1) * 2 -1
-    grid = torch.cat((gridx, gridy), dim=-1)
-    interp = torch.nn.functional.grid_sample(conv, grid)
+    grid = torch.cat((gridx, gridy), dim=-1) # shape: [n, h, w, 2]
+    interp = torch.nn.functional.grid_sample(conv, grid, align_corners=True) # shape: [n, c, h, w]
     # matlab mean(interp) = 0.3483
     return interp
 
@@ -85,5 +85,7 @@ if __name__ == '__main__':
     aif_cp = data['aif'][:, 1].view(1, 1, -1).repeat(2, 2, 1)
     interp = tofts(ktrans, kep, t0, time, aif_time, aif_cp)
 
-    plt.plot(interp[0,0,0, :].squeeze())
+    plt.plot(interp[0,0,1, :].squeeze())
+    plt.plot(data['F'].squeeze())
+    plt.legend(['Torch', 'Matlab'])
     plt.savefig('tofs.pdf')
