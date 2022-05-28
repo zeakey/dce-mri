@@ -8,8 +8,10 @@ filelist = dir(dr1);
 filelist(ismember( {filelist.name}, {'.', '..', '.DS_Store'})) = [];  %remove . and ..
 filelist = filelist([filelist.isdir]);
 
+patient_id = 0;
+
 %%
-for a1 = 1%1:numel(filelist)
+for a1 = 1:numel(filelist)
     drtmp = [filelist(a1).folder '/' filelist(a1).name];
     flist2 = dir(drtmp);
     flist2(ismember( {flist2.name}, {'.', '..','.DS_Store'})) = [];  %remove . and ..
@@ -165,7 +167,20 @@ for a1 = 1%1:numel(filelist)
         end
         % compute PK map
         res_tofts = run_test_new(dce_ct, time_dce/60, maxBase, 1);
-        
+
+        % -----------------------------------------------------------------------------------
+        % save results for comparisons
+        % by Kai
+        ktrans = res_tofts(:, :, :, 1);
+        kep = res_tofts(:, :, :, 2);
+        t0 = res_tofts(:, :, :, 3);
+        loss = res_tofts(:, :, :, 4);
+        savepath = strcat('../tmp/patient-', string(patient_id), '.mat');
+        save(savepath, 'ktrans', 'kep', 't0', 'loss');
+        disp(['save to: ', savepath]);
+        patient_id = patient_id + 1;
+        % -----------------------------------------------------------------------------------
+
         %% Creating DICOM files
         if (write_dicom == 1)
             fullfn_new = strrep(fullfn,dr1,dr2);
