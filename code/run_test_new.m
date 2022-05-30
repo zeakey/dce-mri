@@ -27,7 +27,15 @@ cc = squeeze(mean(mean(mean(cc,1),2),3));
 % FIT DATA To Kinetic Modeling
 switch(mode)
     case 1
-        [p_init, ~] = fit_Tofts(time, cc, aif_init);
+        [p_init, ssd] = fit_Tofts(time, cc, aif_init);
+        % -------------------------------------------------
+        % by Kai for debug
+        cc_hat = fun_Tofts(p_init, time, aif_init);
+        filename='../tmp/fit_cc.mat';
+        if ~isfile(filename)
+            save(filename, "cc", "cc_hat", "aif_init", "time", "p_init", "ssd");
+        end
+        % -------------------------------------------------
         p3_low = p_init(3)-0.1;
         if (p3_low < 0)
             p3_low = 0;
@@ -60,6 +68,7 @@ B    = zeros(nx,ny,nz,6);
 time = time(:);
 
 for zz = 1:nz
+    disp(strcat(string(zz), " of ", string(nz)));
     for xx = 1:nx
         for yy = 1:ny
             
