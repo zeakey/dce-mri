@@ -176,7 +176,7 @@ for a1 = 1:numel(filelist)
         t0 = res_tofts(:, :, :, 3);
         loss = res_tofts(:, :, :, 4);
         savepath = strcat('../tmp/patient-', string(patient_id), '.mat');
-        save(savepath, 'ktrans', 'kep', 't0', 'loss');
+        save(savepath, 'ktrans', 'kep', 't0', 'loss', 'dce_ct', 'time_dce', 'maxBase', 'fullfn');
         disp(['save to: ', savepath]);
         patient_id = patient_id + 1;
         % -----------------------------------------------------------------------------------
