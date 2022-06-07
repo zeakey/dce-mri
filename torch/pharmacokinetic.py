@@ -1,8 +1,13 @@
-import torch, math, os
+import torch, math, os, pydicom
+import os.path as osp
 import numpy as np
+import matplotlib
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
 from einops import rearrange
 from vlkit.lrscheduler import CosineScheduler, MultiStepScheduler
 from torch.utils.tensorboard import SummaryWriter
+from utils import write_dicom, write_dicom_meta
 
 
 def parker_aif(a1, a2, t1, t2, sigma1, sigma2, alpha, beta, s, tau, t):
@@ -169,24 +174,55 @@ def get_ct_curve(params, t, aif_t, aif_cp):
     return tofts(ktrans, kep, t0, t, aif_t, aif_cp).view(-1)
 
 
-def compare_matlab_torch(matlab_param, torch_param, fig_filename):
-    slices = matlab_param.shape[2]
-    assert matlab_param.shape[2] == torch_param.shape[2]
+def compare_results(param1, param2, name1='name1', name2='name2', fig_filename='results.pdf'):
+    slices = param1.shape[2]
+    assert param1.shape[2] == param2.shape[2]
     os.makedirs(osp.dirname(fig_filename), exist_ok=True)
 
     fig, axes = plt.subplots(slices, 2, figsize=(4, 20))
     for ax in axes.flatten():
         ax.set_xticks([])
         ax.set_yticks([])
-    axes[0, 0].set_title("Matlab")
-    axes[0, 1].set_title("Torch")
+    axes[0, 0].set_title(name1)
+    axes[0, 1].set_title(name2)
     for i in range(0, slices):
-        axes[i, 0].imshow(matlab_param[:, :, i])
-        axes[i, 1].imshow(torch_param[:, :, i])
+        axes[i, 0].imshow(param1[:, :, i])
+        axes[i, 1].imshow(param2[:, :, i])
         axes[i, 0].set_ylabel("slice#%.2d"%i)
     plt.tight_layout()
     plt.savefig(fig_filename)
     plt.close()
+
+
+def save_slices_to_dicom(data, dicom_dir, **kwargs):
+    """
+    data: [h w slices]
+    """
+    data = data.astype(np.float64)
+    data = (data * 1000).astype(np.uint16)
+    slices = data.shape[2]
+    for i in range(slices):
+        origin_dicom = '/data1/IDX_Current/dicom/10042_1_004D6Sy8/20160616/iCAD-MCC-Ktrans-FA-0-E_33009/IM-50068-%.4d.dcm' % (i+1)
+        origin_dicom = pydicom.dcmread(origin_dicom)
+        save_fn = osp.join(dicom_dir, 'slice-%.3d.dcm' % i)
+        img = np.squeeze(data[:, :, i])
+        thickness = 3.6
+        write_dicom_meta(
+            img,
+            save_fn,
+            ds=origin_dicom,
+            **kwargs
+        )
+
+
+def np2torch(data, device=torch.device('cpu')):
+    for k, v in data.items():
+        if isinstance(v, np.ndarray):
+            try:
+                data[k] = torch.tensor(v).float().to(device=device)
+            except:
+                pass
+    return data
 
 
 if __name__ == '__main__':
@@ -194,47 +230,18 @@ if __name__ == '__main__':
     import matplotlib
     matplotlib.use('agg')
     import matplotlib.pyplot as plt
-    import pydicom
-    import os.path as osp
     import time, sys
-    from utils import write_dicom, write_dicom_meta
-
-    def save_slices_to_dicom(data, dicom_dir, **kwargs):
-        data = data.astype(np.float64)
-        data = (data * 1000).astype(np.uint16)
-        slices = data.shape[2]
-        for i in range(slices):
-            origin_dicom = '/data1/IDX_Current/dicom/10042_1_004D6Sy8/20160616/iCAD-MCC-Ktrans-FA-0-E_33009/IM-50068-%.4d.dcm' % (i+1)
-            origin_dicom = pydicom.dcmread(origin_dicom)
-            save_fn = osp.join(dicom_dir, 'slice-%.3d.dcm' % i)
-            img = np.squeeze(data[:, :, i])
-            thickness = 3.6
-            write_dicom_meta(
-                img,
-                save_fn,
-                ds=origin_dicom,
-                **kwargs
-            )
 
 
     # save_slices_to_dicom(np.random.randn(160, 160, 20), 'work_dirs/debug', SeriesDescription='PyTorch-Ktrans')
     # sys.exit()
 
-    work_dir = 'work_dirs/RMSprop_lr1e-3~1e-8'
+    work_dir = 'work_dirs/RMSprop_lr1e-3~1e-8_iter500'
 
     device = torch.device('cuda')
 
-    def np2torch(data):
-        for k, v in data.items():
-            if isinstance(v, np.ndarray): data[k] = torch.tensor(v).to(device=device).float()
-        return data
-    
-    # Hct = 0.42;
-    # cp_parker = parker_aif(0.809,0.330,0.17046,0.365,0.0563,0.132,1.050, ...
-    # 0.1685,38.078,0.483,tp-ceil(time(maxBase)/tdel)*tdel)/(1-Hct);
-
     data = loadmat('../tmp/patient-0.mat')
-    data = np2torch(data)
+    data = np2torch(data, device=device)
 
     time_dce = data['time_dce'] / 60
     aif_t = torch.arange(0, time_dce[-1].item(), 1/60, dtype=torch.float64).to(time_dce)
@@ -247,7 +254,8 @@ if __name__ == '__main__':
         alpha=1.050, beta=0.1685, s=38.078, tau=0.483,
         t=aif_t - (time_dce[int(data['maxBase'].item())-1] * 60).ceil() / 60
         ) / (1 - hct)
-    
+
+    tic = time.time()
     param, loss = process_patient(
         data['time_dce'] / 60,
         data['dce_ct'], aif_t,
@@ -255,6 +263,8 @@ if __name__ == '__main__':
         max_iter=500,
         work_dir=work_dir
     )
+    toc = time.time()
+    print("Done, ETA=%.3f" % (toc-tic))
     matlab_param = torch.stack((data['ktrans'], data['kep'], data['t0']), dim=-1)
     compare_matlab_torch(data['ktrans'].cpu(), param[:,:,:,0].cpu(), osp.join(work_dir, 'ktrans.pdf'))
     compare_matlab_torch(data['kep'].cpu(), param[:,:,:,1].cpu(), osp.join(work_dir, 'kep.pdf'))
@@ -271,111 +281,3 @@ if __name__ == '__main__':
     save_slices_to_dicom(param[:, :, :, 1].cpu().numpy(), dicom_dir=osp.join(work_dir, 'dicom/torch-kep/'), SeriesDescription='Torch-Kep')
     save_slices_to_dicom(param[:, :, :, 2].cpu().numpy(), dicom_dir=osp.join(work_dir, 'dicom/torch-t0/'), SeriesDescription='Torch-T0')
     save_slices_to_dicom(loss.cpu().numpy(), dicom_dir=osp.join(work_dir, 'dicom/torch-loss/'), SeriesDescription='Loss-T0')
-
-    sys.exit()
-    # fit tofts
-    # fit a sisngle voxel
-    data = loadmat('../tmp/fit_cc.mat')
-    data = np2torch(data)
-    ct = data['cc'].squeeze().view(1,1, -1)
-    t = data['time'].view(1, 1, -1)
-    params, loss_cc, = fit_slice(
-        t, ct,
-        aif_t.view(1, 1, -1),
-        aif_cp.view(1, 1, -1),
-        max_lr=1e-3,
-        max_iter=1000,
-        tensorboard=None
-    )
-
-    matlab_reconsructed_curve = data['cc_hat'].squeeze()
-    torch_reconsructed_curve = tofts(params[:, :, 0], params[:, :, 1], params[:, :, 2], t, aif_t, aif_cp).squeeze()
-
-    loss_matlab = torch.nn.functional.mse_loss(matlab_reconsructed_curve, data['cc'].squeeze(), reduction='sum')
-    loss_torch = torch.nn.functional.mse_loss(torch_reconsructed_curve, data['cc'].squeeze(), reduction='sum')
-
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-    matlab_params = data['p_init'].squeeze().cpu()
-    axes[0].plot(data['cc'].squeeze().cpu())
-    axes[0].plot(matlab_reconsructed_curve.cpu())
-    axes[0].legend(['C(t)', 'Matlab (ktrans=%.3f, kep=%.3f, t0=%.3f)' % (matlab_params[0], matlab_params[1], matlab_params[2])])
-    axes[0].set_title('Matlab')
-    #
-    axes[1].plot(data['cc'].squeeze().cpu())
-    axes[1].plot(torch_reconsructed_curve.cpu())
-    axes[1].legend(['C(t)', 'Torch (ktrans=%.3f, kep=%.3f, t0=%.3f)' % (params[:, :, 0], params[:, :, 1], params[:, :, 2])])
-    axes[1].set_title('Torch')
-    plt.tight_layout()
-    plt.savefig(osp.join(work_dir, 'fit_a_voxel.pdf'))
-    plt.close()
-
-    # fit an entire volumn
-    data = loadmat('../tmp/fit_tofts.mat')
-    data = np2torch(data)
-    ct = data['ct'].squeeze()
-    # ct1 = ct[:, :, 0:10, :]
-    ct1 = rearrange(ct, 'h w s f -> h (w s) f')
-    h, w, _ = ct1.shape
-    t = data['time'].view(1, 1, -1)
-    tic = time.time()
-    params, loss = fit_slice(
-        t.repeat(h, w, 1),
-        ct1,
-        aif_t.repeat(h, w, 1),
-        aif_cp.repeat(h, w, 1),
-        max_lr=1e-3,
-        max_iter=1000,
-        init_params=None,
-        tensorboard=osp.join(work_dir, 'tensorboard')
-    )
-    print("Done, ETA=%.3f" % (time.time() - tic))
-    params = rearrange(params, 'h (w s) p -> h w s p', h=160, w=160, s=20, p=3)
-
-    # debug outliers
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-    idx = params[:, :, :, 0].argmax().item()
-    maxv = params[:, :, :, 1].flatten()[idx].item()
-    params1 = torch.stack([
-        params[:, :, :, 0].flatten()[idx],
-        params[:, :, :, 1].flatten()[idx],
-        params[:, :, :, 2].flatten()[idx]
-    ])
-    ct1_hat = get_ct_curve(params1, t, aif_t, aif_cp).cpu().flatten()
-    axes[0].plot(ct1.reshape(-1, 75)[idx].flatten().cpu().numpy())
-    axes[0].plot(ct1_hat)
-    axes[0].set_title('Max Ktrans=%.3e' % maxv)
-
-    idx = params[:, :, :, 1].argmax().item()
-    maxv = params[:, :, :, 1].flatten()[idx].item()
-    params1 = torch.stack([
-        params[:, :, :, 0].flatten()[idx],
-        params[:, :, :, 1].flatten()[idx],
-        params[:, :, :, 2].flatten()[idx]
-    ])
-    ct1_hat = get_ct_curve(params1, t, aif_t, aif_cp).cpu().flatten()
-    axes[1].plot(ct1.reshape(-1, 75)[idx].flatten().cpu().numpy())
-    axes[1].plot(ct1_hat)
-    axes[1].set_title('Max Kep=%.3e' % maxv)
-    plt.savefig(osp.join(work_dir, 'debug_max_params.pdf'))
-    plt.close()
-
-
-    # compare results of Matlab and Torch
-    data = loadmat('../tmp/volumn_results.mat')
-
-    
-
-    params = params.cpu().numpy()
-    np.save(osp.join(work_dir, 'params.npy'), params)
-    compare_matlab_torch(data['B'][:, :, :, 0], params[:, :, :, 0], osp.join(work_dir, 'ktrans.pdf'))
-    compare_matlab_torch(data['B'][:, :, :, 1], params[:, :, :, 1], osp.join(work_dir, 'kep.pdf'))
-    compare_matlab_torch(data['B'][:, :, :, 2], params[:, :, :, 2], osp.join(work_dir, 't0.pdf'))
-
-    # save results to dicom
-    save_slices_to_dicom(data['B'][:, :, :, 0], dicom_dir=osp.join(work_dir, 'dicom/matlab-ktrans/'), SeriesDescription='Matlab-Ktrans')
-    save_slices_to_dicom(data['B'][:, :, :, 1], dicom_dir=osp.join(work_dir, 'dicom/matlab-kep/'), SeriesDescription='Matlab-Kep')
-    save_slices_to_dicom(data['B'][:, :, :, 2], dicom_dir=osp.join(work_dir, 'dicom/matlab-t0/'), SeriesDescription='Matlab-T0')
-    #
-    save_slices_to_dicom(params[:, :, :, 0], dicom_dir=osp.join(work_dir, 'dicom/torch-ktrans/'), SeriesDescription='Torch-Ktrans')
-    save_slices_to_dicom(params[:, :, :, 1], dicom_dir=osp.join(work_dir, 'dicom/torch-kep/'), SeriesDescription='Torch-Kep')
-    save_slices_to_dicom(params[:, :, :, 2], dicom_dir=osp.join(work_dir, 'dicom/torch-t0/'), SeriesDescription='Torch-T0')

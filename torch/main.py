@@ -1,6 +1,40 @@
 import torch
-from models.rnn import RNNModel
-from pharmacokinetic import parker_aif, tofts, np2torch
+from models import Transformer
+from pharmacokinetic import parker_aif, tofts, np2torch, save_slices_to_dicom, compare_results
+from torch.utils.tensorboard import SummaryWriter
+import os, sys, argparse, time
+from einops import rearrange
+from tqdm import tqdm
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train a segmentor')
+    # parser.add_argument('config', help='train config file path')
+    parser.add_argument('--max-iters', type=lambda x: int(float(x)), default=1e5)
+    parser.add_argument('--max-lr', type=float, default=1e-4)
+    parser.add_argument('--log-freq', type=int, default=100)
+    parser.add_argument('--test', action='store_true', help='test')
+    parser.add_argument('--work-dir', type=str, default='./')
+    parser.add_argument('--pretrained', type=str, default='./')
+    args = parser.parse_args()
+    args.max_iters = int(args.max_iters)
+    args.log_freq = int(args.log_freq)
+    return args
+
+
+def train(model, optimizer, lrscheduler):
+    pass
+
+
+def generate_data(ktrans, kep, t0, aif_t, aif_cp):
+    batch_size = ktrans.shape[0]
+    # t = torch.rand(batch_size, 1, 75).sort(dim=2).values.to(aif_t) * aif_t.max()
+    # t = torch.linspace(0, aif_t.max(), 75, device=aif_t.device).view(1, 1, -1).repeat(batch_size, 1, 1)
+    t = time_dce.view(1, 1, -1).repeat(batch_size, 1, 1)
+    ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
+    noice = torch.randn(ct.shape, device=ct.device) / 10
+    ct += ct * noice
+    return ct, t / aif_t.max()
 
 
 if __name__ == '__main__':
@@ -10,20 +44,82 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     from vlkit.lrscheduler import CosineScheduler
     import os.path as osp
+
+    args = parse_args()
+
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
+
+    model = Transformer(
+        seq_len=75,
+        drop_rate=0.2,
+        use_grad=True,
+        num_layers=8,
+        num_heads=4,
+        embed_dims=64
+    )
+
+    model = model.to(device)
+
+    if args.test:
+        assert osp.isfile(args.pretrained)
+        pretrained = torch.load(args.pretrained)
+        model.load_state_dict(pretrained)
+        model.eval()
+        
+        data = loadmat('../tmp/patient-0.mat')
+        ct = torch.from_numpy(data['dce_ct']).to(device).float()
+        t = torch.from_numpy(data['time_dce']).to(device).float() / 60
+
+        h, w, s, f = ct.shape
+        ct = rearrange(ct, 'h w s f -> h (w s) f')
+        ktrans = torch.zeros(h, w*s).to(ct)
+        kep = torch.zeros(h, w*s).to(ct)
+        t0 = torch.zeros(h, w*s).to(ct)
+
+        tic = time.time()
+        with torch.no_grad():
+            for i, d in enumerate(tqdm(ct)):
+                ktrans_, kep_, t0_ = model(d.unsqueeze(dim=-1), t)
+                ktrans[i, ] = ktrans_.squeeze(dim=1)
+                kep[i, ] = kep_.squeeze(dim=1)
+                t0[i, ] = t0_.squeeze(dim=1)
+        ktrans = rearrange(ktrans, 'h (w s) -> h w s', w=w)
+        kep = rearrange(kep, 'h (w s) -> h w s', w=w)
+        t0 = rearrange(t0, 'h (w s) -> h w s', w=w)
+        print("ETA: %f" % (time.time() - tic))
+
+        ktrans = ktrans.cpu().numpy()
+        kep = kep.cpu().numpy()
+        t0 = t0.cpu().numpy()
+
+        save_slices_to_dicom(ktrans, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-ktrans/'), SeriesDescription='Transformer-ktrans')
+        save_slices_to_dicom(kep, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-kep/'), SeriesDescription='Transformer-kep')
+        save_slices_to_dicom(t0, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-ktrans/'), SeriesDescription='Transformer-t0')
+        
+        compare_results(ktrans, data['ktrans'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 'ktrans.pdf'))
+        compare_results(kep, data['kep'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 'kep.pdf'))
+        compare_results(t0, data['t0'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 't0.pdf'))
+        sys.exit()
+
     
-    work_dir = 'work_dirs/GRU'
-    device = torch.device('cuda')
+    os.makedirs(args.work_dir, exist_ok=True)
+    tensorboard = SummaryWriter(osp.join(args.work_dir, 'tensorboard'))
+
     batch_size = 256
 
-    model = RNNModel(input_size=2, num_layers=12).to(device)
+    
     
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, weight_decay=1e-4, momentum=0.9)
     # optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3, weight_decay=1e-4, momentum=0.9)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=0)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=5e-5)
 
-    max_iter = int(1e4)
-    max_lr = 1e-2
-    lrscheduler = CosineScheduler(epoch_iters=max_iter, epochs=1, max_lr=max_lr, min_lr=max_lr*1e-5, warmup_iters=20)
+    # optimizer stolen from https://github.com/open-mmlab/mmclassification/blob/master/configs/_base_/schedules/imagenet_bs1024_adamw_swin.py
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05, eps=1e-8, betas=(0.9, 0.999))
+
+    lrscheduler = CosineScheduler(epoch_iters=args.max_iters, epochs=1, max_lr=args.max_lr, min_lr=args.max_lr*1e-5, warmup_iters=20)
 
     data = loadmat('../tmp/patient-0.mat')
     data = np2torch(data)
@@ -43,19 +139,24 @@ if __name__ == '__main__':
     aif_t = aif_t.view(1, 1, -1).repeat(batch_size, 1, 1)
     aif_cp = aif_cp.view(1, 1, -1).repeat(batch_size, 1, 1)
 
-    for i in range(max_iter):
+
+    for i in range(args.max_iters):
         ktrans = torch.zeros(batch_size, 1).uniform_(0, 5).to(aif_t)
         kep = torch.zeros(batch_size, 1).uniform_(0, 50).to(aif_t)
         t0 = torch.zeros(batch_size, 1).uniform_(0, 0.25).to(aif_t)
 
         params = torch.stack((ktrans, kep, t0)).squeeze(dim=-1).transpose(0, 1)
-        curves = tofts(ktrans, kep, t0, aif_t, aif_t, aif_cp)
-        grad = torch.gradient(curves.squeeze(dim=1), dim=1)[0].unsqueeze(dim=1)
-        input = torch.cat((curves, grad), dim=1)
+        ct, t = generate_data(ktrans, kep, t0, aif_t, aif_cp)
 
-        ktrans, kep, t0 = model(input.transpose(1, 2))
+        t = t.squeeze(dim=1)
+
+        ktrans, kep, t0 = model(ct.transpose(1, 2), t)
+
+        # scale = [10, 1, 200]
+        # scale = torch.tensor([10, 1, 200]).view(1, 3).to(ktrans)
+        scale = torch.tensor([1, 1, 1]).view(1, 3).to(ktrans)
         output = torch.cat((ktrans, kep, t0), dim=1)
-        loss = torch.nn.functional.mse_loss(output, params)
+        loss = (torch.nn.functional.mse_loss(output, params, reduction='none') * scale).mean()
         # loss = torch.nn.functional.l1_loss(output, params)
 
         optimizer.zero_grad()
@@ -66,9 +167,11 @@ if __name__ == '__main__':
             pg['lr'] = lr
         optimizer.step()
 
-        if i % 10 == 0:
+        if i % args.log_freq == 0 or i == args.max_iters - 1 or i == 0:
             print("iter %.3d loss=%.3f  lr=%.2e" % (i, loss.item(), lr))
+            tensorboard.add_scalar('lr', lr, i)
+            tensorboard.add_scalar('loss', loss.mean().item(), i)
 
-    torch.save(model.state_dict(), osp.join(work_dir, 'model.pth'))
+    torch.save(model.state_dict(), osp.join(args.work_dir, 'model.pth'))
         # plt.plot(curves[0, 0, :].cpu())
         # plt.savefig('curve.pdf')
