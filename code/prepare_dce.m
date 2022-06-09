@@ -165,8 +165,18 @@ for a1 = 1:numel(filelist)
         else
             dce_ct = computeGdConc(dce, 1,   maxBase, tr, fa);
         end
+
+        % by Kai
+        savepath = strcat('../tmp/patient-', string(patient_id), '.mat');
+        patient_id = patient_id + 1;
+
         % compute PK map
-        res_tofts = run_test_new(dce_ct, time_dce/60, maxBase, 1);
+        if ~isfile(savepath)
+            res_tofts = run_test_new(dce_ct, time_dce/60, maxBase, 1);
+        else
+            disp(strcat(['file', savepath, ' exists, continue!']))
+            continue
+        end
 
         % -----------------------------------------------------------------------------------
         % save results for comparisons
@@ -175,10 +185,8 @@ for a1 = 1:numel(filelist)
         kep = res_tofts(:, :, :, 2);
         t0 = res_tofts(:, :, :, 3);
         loss = res_tofts(:, :, :, 4);
-        savepath = strcat('../tmp/patient-', string(patient_id), '.mat');
         save(savepath, 'ktrans', 'kep', 't0', 'loss', 'dce_ct', 'time_dce', 'maxBase', 'fullfn');
         disp(['save to: ', savepath]);
-        patient_id = patient_id + 1;
         % -----------------------------------------------------------------------------------
 
         %% Creating DICOM files
