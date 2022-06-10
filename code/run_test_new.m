@@ -42,7 +42,11 @@ switch(mode)
         end
         
         bb(:,1) = [0.001, 0.001, p3_low ]; % lower bounds
-        bb(:,2) = [    5,     1, p_init(3)+0.25]; % upper bounds
+        % bb(:,2) = [    5,     1, p_init(3)+0.25]; % upper bounds
+
+        % by Kai
+        % fix the upper bound of kep
+        bb(:,2) = [    5,     50, p_init(3)+0.25]; % upper bounds
     case 2
         [p_init, ~] = fit_Tofts_Disp(time, cc, aif_init);
         
