@@ -1,10 +1,15 @@
 import torch
 from models import Transformer
-from pharmacokinetic import parker_aif, tofts, np2torch, save_slices_to_dicom, compare_results
+from pharmacokinetic import (
+    parker_aif,
+     tofts, np2torch,
+     save_slices_to_dicom,
+     compare_results)
 from torch.utils.tensorboard import SummaryWriter
 import os, sys, argparse, time
 from einops import rearrange
 from tqdm import tqdm
+import vlkit.plt as vlplt
 
 
 def parse_args():
@@ -95,13 +100,18 @@ if __name__ == '__main__':
         kep = kep.cpu().numpy()
         t0 = t0.cpu().numpy()
 
-        save_slices_to_dicom(ktrans, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-ktrans/'), SeriesDescription='Transformer-ktrans')
-        save_slices_to_dicom(kep, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-kep/'), SeriesDescription='Transformer-kep')
-        save_slices_to_dicom(t0, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-ktrans/'), SeriesDescription='Transformer-t0')
-        
-        compare_results(ktrans, data['ktrans'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 'ktrans.pdf'))
-        compare_results(kep, data['kep'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 'kep.pdf'))
-        compare_results(t0, data['t0'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 't0.pdf'))
+        save_slices_to_dicom(ktrans, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-ktrans/'), SeriesDescription='Transformer-ktrans', SeriesNumber=30000)
+        save_slices_to_dicom(kep, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-kep/'), SeriesDescription='Transformer-kep', SeriesNumber=30001)
+        save_slices_to_dicom(t0, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-t0/'), SeriesDescription='Transformer-t0', SeriesNumber=30002)
+        #
+        save_slices_to_dicom(data['ktrans'], dicom_dir=osp.join(args.work_dir, 'dicom/Matlab-ktrans/'), SeriesDescription='Matlab-ktrans', SeriesNumber=30003)
+        save_slices_to_dicom(data['kep'], dicom_dir=osp.join(args.work_dir, 'dicom/Matlab-kep/'), SeriesDescription='Matlab-kep', SeriesNumber=30004)
+        save_slices_to_dicom(data['t0'], dicom_dir=osp.join(args.work_dir, 'dicom/Matlab-t0/'), SeriesDescription='Matlab-t0', SeriesNumber=30005)
+
+
+        compare_results(ktrans[74:100, 71:100,], data['ktrans'][74:100, 71:100,], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 'ktrans.pdf'))
+        compare_results(kep[64:100, 71:100,], data['kep'][64:100, 71:100,], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 'kep.pdf'))
+        compare_results(t0[64:100, 71:100,], data['t0'][64:100, 71:100,], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 't0.pdf'))
         sys.exit()
 
     
@@ -142,7 +152,7 @@ if __name__ == '__main__':
 
     for i in range(args.max_iters):
         ktrans = torch.zeros(batch_size, 1).uniform_(0, 5).to(aif_t)
-        kep = torch.zeros(batch_size, 1).uniform_(0, 50).to(aif_t)
+        kep = torch.zeros(batch_size, 1).uniform_(0, 2).to(aif_t)
         t0 = torch.zeros(batch_size, 1).uniform_(0, 0.25).to(aif_t)
 
         params = torch.stack((ktrans, kep, t0)).squeeze(dim=-1).transpose(0, 1)
