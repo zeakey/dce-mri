@@ -2,9 +2,11 @@ from turtle import forward
 import torch
 import torch.nn as nn
 from mmcls.models.backbones.vision_transformer import TransformerEncoderLayer
+from mmcv.cnn import MODELS
 
 
-class Transformer(nn.Module):
+@MODELS.register_module()
+class DCETransformer(nn.Module):
     def __init__(
         self,
         seq_len,
@@ -34,16 +36,15 @@ class Transformer(nn.Module):
         self.linear = nn.Linear(input_dim, embed_dims)
         self.layers = nn.ModuleList()
 
-        self.ktrans = torch.nn.Linear(embed_dims, 1)
-        self.kep = torch.nn.Linear(embed_dims, 1)
-        self.t0 = torch.nn.Linear(embed_dims, 1)
+        # use ReLU to prevent negative outputs
+        self.ktrans = nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU())
+        self.kep = nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU())
+        self.t0 = nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU())
 
         for _ in range(num_layers):
             self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
     
-    def forward(self, x, t):
-        assert t.ndim == 2
-        t = t.unsqueeze(dim=-1)
+    def forward(self, x, t=None):
         B = x.shape[0]
 
         if self.use_grad:
@@ -72,7 +73,7 @@ class Transformer(nn.Module):
 
 if __name__ == '__main__':
     import time
-    model = Transformer().cuda()
+    model = MODELS.build(dict(type='DCETransformer', seq_len=75, use_grad=False)).cuda()
     x = torch.randn(160*160, 75, 2).cuda()
     tic = time.time()
     print(model(x))

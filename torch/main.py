@@ -1,10 +1,12 @@
 import torch
-from models import Transformer
 from torch.utils.tensorboard import SummaryWriter
 import os, sys, argparse, time
 from einops import rearrange
 from tqdm import tqdm
 import vlkit.plt as vlplt
+
+from mmcv.cnn import MODELS
+from mmcv.utils import Config
 
 from pharmacokinetic import (
     parker_aif,
@@ -16,12 +18,12 @@ from ct_sampler import CTSampler
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
-    # parser.add_argument('config', help='train config file path')
+    parser.add_argument('config', help='train config file path')
     parser.add_argument('--max-iters', type=lambda x: int(float(x)), default=1e5)
     parser.add_argument('--max-lr', type=float, default=1e-4)
     parser.add_argument('--log-freq', type=int, default=100)
     parser.add_argument('--test', action='store_true', help='test')
-    parser.add_argument('--work-dir', type=str, default='./')
+    parser.add_argument('--work-dir', type=str)
     parser.add_argument('--pretrained', type=str, default='./')
     args = parser.parse_args()
     args.max_iters = int(args.max_iters)
@@ -54,19 +56,14 @@ if __name__ == '__main__':
 
     args = parse_args()
 
+    cfg = Config.fromfile(args.config)
+
     if torch.cuda.is_available():
         device = torch.device('cuda')
     else:
         device = torch.device('cpu')
 
-    model = Transformer(
-        seq_len=75,
-        drop_rate=0.2,
-        use_grad=True,
-        num_layers=3,
-        num_heads=4,
-        embed_dims=64
-    )
+    model = MODELS.build(cfg.model)
 
     model = model.to(device)
 
@@ -104,23 +101,34 @@ if __name__ == '__main__':
         kep = kep.cpu().numpy()
         t0 = t0.cpu().numpy()
 
-        save_slices_to_dicom(ktrans, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-ktrans/'), SeriesDescription='Transformer-ktrans', SeriesNumber=30000)
-        save_slices_to_dicom(kep, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-kep/'), SeriesDescription='Transformer-kep', SeriesNumber=30001)
-        save_slices_to_dicom(t0, dicom_dir=osp.join(args.work_dir, 'dicom/tansformer-t0/'), SeriesDescription='Transformer-t0', SeriesNumber=30002)
+        save_slices_to_dicom(ktrans, dicom_dir=osp.join(cfg.work_dir, 'dicom/tansformer-ktrans/'), SeriesDescription='Transformer-ktrans', SeriesNumber=30000)
+        save_slices_to_dicom(kep, dicom_dir=osp.join(cfg.work_dir, 'dicom/tansformer-kep/'), SeriesDescription='Transformer-kep', SeriesNumber=30001)
+        save_slices_to_dicom(t0, dicom_dir=osp.join(cfg.work_dir, 'dicom/tansformer-t0/'), SeriesDescription='Transformer-t0', SeriesNumber=30002)
         #
-        save_slices_to_dicom(data['ktrans'], dicom_dir=osp.join(args.work_dir, 'dicom/Matlab-ktrans/'), SeriesDescription='Matlab-ktrans', SeriesNumber=30003)
-        save_slices_to_dicom(data['kep'], dicom_dir=osp.join(args.work_dir, 'dicom/Matlab-kep/'), SeriesDescription='Matlab-kep', SeriesNumber=30004)
-        save_slices_to_dicom(data['t0'], dicom_dir=osp.join(args.work_dir, 'dicom/Matlab-t0/'), SeriesDescription='Matlab-t0', SeriesNumber=30005)
+        save_slices_to_dicom(data['ktrans'], dicom_dir=osp.join(cfg.work_dir, 'dicom/Matlab-ktrans/'), SeriesDescription='Matlab-ktrans', SeriesNumber=30003)
+        save_slices_to_dicom(data['kep'], dicom_dir=osp.join(cfg.work_dir, 'dicom/Matlab-kep/'), SeriesDescription='Matlab-kep', SeriesNumber=30004)
+        save_slices_to_dicom(data['t0'], dicom_dir=osp.join(cfg.work_dir, 'dicom/Matlab-t0/'), SeriesDescription='Matlab-t0', SeriesNumber=30005)
 
 
-        compare_results(ktrans, data['ktrans'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 'ktrans.pdf'))
-        compare_results(kep, data['kep'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 'kep.pdf'))
-        compare_results(t0, data['t0'], name1='Transformer', name2='Matlab', fig_filename=osp.join(args.work_dir, 't0.pdf'))
+        compare_results(ktrans, data['ktrans'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 'ktrans.pdf'))
+        compare_results(kep, data['kep'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 'kep.pdf'))
+        compare_results(t0, data['t0'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 't0.pdf'))
         sys.exit()
 
 
-    os.makedirs(args.work_dir, exist_ok=True)
-    tensorboard = SummaryWriter(osp.join(args.work_dir, 'tensorboard'))
+    # work_dir is determined in this priority: CLI > segment in file > filename
+    if args.work_dir is not None:
+        # update configs according to CLI args if args.work_dir is not None
+        cfg.work_dir = args.work_dir
+    elif cfg.get('work_dir', None) is None:
+        # use config filename as default work_dir if cfg.work_dir is None
+        cfg.work_dir = osp.join('./work_dirs',
+                                osp.splitext(osp.basename(args.config))[0])
+    os.makedirs(cfg.work_dir, exist_ok=True)
+    cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
+    print(cfg)
+
+    tensorboard = SummaryWriter(osp.join(cfg.work_dir, 'tensorboard'))
 
     batch_size = 256
 
@@ -190,6 +198,6 @@ if __name__ == '__main__':
             tensorboard.add_scalar('lr', lr, i)
             tensorboard.add_scalar('loss', loss.mean().item(), i)
 
-    torch.save(model.state_dict(), osp.join(args.work_dir, 'model.pth'))
+    torch.save(model.state_dict(), osp.join(cfg.work_dir, 'model.pth'))
         # plt.plot(curves[0, 0, :].cpu())
         # plt.savefig('curve.pdf')
