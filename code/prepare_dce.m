@@ -185,7 +185,7 @@ for a1 = 1:numel(filelist)
         kep = res_tofts(:, :, :, 2);
         t0 = res_tofts(:, :, :, 3);
         loss = res_tofts(:, :, :, 4);
-        save(savepath, 'ktrans', 'kep', 't0', 'loss', 'dce_ct', 'time_dce', 'maxBase', 'fullfn');
+        save(savepath, 'ktrans', 'kep', 't0', 'loss', 'dce', 'dce_ct', 'time_dce', 'maxBase', 'fullfn');
         disp(['save to: ', savepath]);
         % -----------------------------------------------------------------------------------
 
