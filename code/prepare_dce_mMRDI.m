@@ -1,8 +1,8 @@
 clear all; clc; close all;
 
 write_dicom = 1;
-dr1 = '/Users/ksung/Desktop/DCE_MRI_Matlab/dicom/';
-dr2 = '/Users/ksung/Desktop/DCE_MRI_Matlab/dicom_pk/';
+dr1 = '../dicom/';
+dr2 = '../dicom_pk/';
 
 filelist = dir(dr1);
 filelist(ismember( {filelist.name}, {'.', '..', '.DS_Store'})) = [];  %remove . and ..
