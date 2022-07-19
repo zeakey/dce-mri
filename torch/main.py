@@ -1,18 +1,24 @@
+from multiprocessing.sharedctypes import Value
 import torch
 from torch.utils.tensorboard import SummaryWriter
+import numpy as np
 import os, sys, argparse, time
 from einops import rearrange
 from tqdm import tqdm
 import vlkit.plt as vlplt
 
 from mmcv.cnn import MODELS
-from mmcv.utils import Config
+from mmcv.utils import Config, DictAction, get_logger
 
 from pharmacokinetic import (
-    parker_aif,
      tofts, np2torch,
-     save_slices_to_dicom,
      compare_results)
+from utils import (
+    read_dce_folder,
+    find_max_base,
+    save_slices_to_dicom
+)
+from aif import parker_aif, biexp_aif
 from ct_sampler import CTSampler
 
 
@@ -25,6 +31,16 @@ def parse_args():
     parser.add_argument('--test', action='store_true', help='test')
     parser.add_argument('--work-dir', type=str)
     parser.add_argument('--pretrained', type=str, default='./')
+    parser.add_argument(
+        '--cfg-options',
+        nargs='+',
+        action=DictAction,
+        help='override some settings in the used config, the key-value pair '
+        'in xxx=yyy format will be merged into config file. If the value to '
+        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
+        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
+        'Note that the quotation marks are necessary and that no white space '
+        'is allowed.')
     args = parser.parse_args()
     args.max_iters = int(args.max_iters)
     args.log_freq = int(args.log_freq)
@@ -35,15 +51,13 @@ def train(model, optimizer, lrscheduler):
     pass
 
 
-def generate_data(ktrans, kep, t0, aif_t, aif_cp):
+def generate_data(ktrans, kep, t0, aif_t, aif_cp, t):
     batch_size = ktrans.shape[0]
-    # t = torch.rand(batch_size, 1, 75).sort(dim=2).values.to(aif_t) * aif_t.max()
-    # t = torch.linspace(0, aif_t.max(), 75, device=aif_t.device).view(1, 1, -1).repeat(batch_size, 1, 1)
-    t = time_dce.view(1, 1, -1).repeat(batch_size, 1, 1)
+    t = t.view(1, 1, -1).repeat(batch_size, 1, 1)
     ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
     noice = torch.randn(ct.shape, device=ct.device) / 4
     ct += ct * noice
-    return ct, t / aif_t.max()
+    return ct
 
 
 if __name__ == '__main__':
@@ -55,8 +69,26 @@ if __name__ == '__main__':
     import os.path as osp
 
     args = parse_args()
-
     cfg = Config.fromfile(args.config)
+
+    if args.cfg_options is not None:
+        cfg.merge_from_dict(args.cfg_options)
+    
+    # work_dir is determined in this priority: CLI > segment in file > filename
+    if args.work_dir is not None:
+        # update configs according to CLI args if args.work_dir is not None
+        cfg.work_dir = args.work_dir
+    elif cfg.get('work_dir', None) is None:
+        # use config filename as default work_dir if cfg.work_dir is None
+        cfg.work_dir = osp.join('./work_dirs',
+                                osp.splitext(osp.basename(args.config))[0])
+    os.makedirs(cfg.work_dir, exist_ok=True)
+    cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
+    
+    timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+    log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
+    logger = get_logger(name="DCE", log_file=log_file)
+    logger.info(cfg)
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -116,18 +148,6 @@ if __name__ == '__main__':
         sys.exit()
 
 
-    # work_dir is determined in this priority: CLI > segment in file > filename
-    if args.work_dir is not None:
-        # update configs according to CLI args if args.work_dir is not None
-        cfg.work_dir = args.work_dir
-    elif cfg.get('work_dir', None) is None:
-        # use config filename as default work_dir if cfg.work_dir is None
-        cfg.work_dir = osp.join('./work_dirs',
-                                osp.splitext(osp.basename(args.config))[0])
-    os.makedirs(cfg.work_dir, exist_ok=True)
-    cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
-    print(cfg)
-
     tensorboard = SummaryWriter(osp.join(cfg.work_dir, 'tensorboard'))
 
     batch_size = 256
@@ -141,20 +161,53 @@ if __name__ == '__main__':
 
     lrscheduler = CosineScheduler(epoch_iters=args.max_iters, epochs=1, max_lr=args.max_lr, min_lr=args.max_lr*1e-5, warmup_iters=20)
 
-    data = loadmat('../tmp/patient-0.mat')
-    data = np2torch(data)
+    # read data
+    dicom_data = read_dce_folder('../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000')
+    dce_data = torch.tensor(dicom_data['data'].astype(np.float32)).float().to(device=device)
+    acquisition_time = torch.tensor(dicom_data['acquisition_time']).to(dce_data)
+    acquisition_time = acquisition_time - acquisition_time[0]
+    repetition_time = torch.tensor(dicom_data['repetition_time']).to(dce_data)
+    flip_angle = torch.tensor(dicom_data['flip_angle']).to(dce_data)
 
-    time_dce = (data['time_dce'] / 60).to(device=device)
-    aif_t = torch.arange(0, time_dce[-1].item(), 1/60, dtype=torch.float64).to(time_dce)
+    max_base = find_max_base(dce_data)
 
+    shift_base = False
+    if shift_base:
+        # important! shift max_base for uniform ct
+        dce_data = dce_data[:, :, :, max_base:]
+        dce_data = torch.cat((
+                dce_data,
+                dce_data[:, :, :, -1:].repeat(1, 1, 1, max_base)
+            ), dim=-1)
+
+        acquisition_time = acquisition_time[max_base:]
+        interval = (acquisition_time[-1] - acquisition_time[0]) / (acquisition_time.numel() - 1)
+
+        acquisition_time = torch.cat((acquisition_time, acquisition_time[-1] + torch.arange(1, max_base+1).to(device) * interval), dim=0)
+        acquisition_time = acquisition_time - acquisition_time[0]
+
+    # second to minite
+    acquisition_time = acquisition_time / 60
+
+    # we assume 7 minutes aif at most
+    aif_t = torch.arange(0, 7, 1/60, dtype=torch.float64).to(acquisition_time)
+    aif_t = aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
+    max_base = 6
     hct = 0.42
-    aif_cp = parker_aif(
-        a1=0.809, a2=0.330,
-        t1=0.17046, t2=0.365,
-        sigma1=0.0563, sigma2=0.132,
-        alpha=1.050, beta=0.1685, s=38.078, tau=0.483,
-        t=aif_t - (time_dce[int(data['maxBase'].item())-1] * 60).ceil() / 60
-        ) / (1 - hct)
+    if cfg.aif == 'parker':
+        aif_cp = parker_aif(
+            a1=0.809, a2=0.330,
+            t1=0.17046, t2=0.365,
+            sigma1=0.0563, sigma2=0.132,
+            alpha=1.050, beta=0.1685, s=38.078, tau=0.483,
+            t=aif_t
+            ) / (1 - hct)
+    elif cfg.aif == 'weinmann':
+        aif_cp = biexp_aif(3.99, 4.78, 0.144, 0.011, aif_t) / (1 - hct)
+    elif cfg.aif == 'fh':
+        aif_cp = biexp_aif(24, 6.2, 3.0, 0.016, aif_t) / (1 - hct)
+    else:
+        raise ValueError('Invalid AIF: %s' % cfg.aif)
 
     aif_t = aif_t.view(1, 1, -1).repeat(batch_size, 1, 1)
     aif_cp = aif_cp.view(1, 1, -1).repeat(batch_size, 1, 1)
@@ -169,21 +222,17 @@ if __name__ == '__main__':
 
             params = torch.stack((ktrans, kep, t0)).squeeze(dim=-1).transpose(0, 1)
         else:
-            params = param_sampler.sample(batch_size).to(aif_t)
+            params = param_sampler.sample(batch_size).to(dce_data)
             ktrans, kep, t0 = params.chunk(dim=1, chunks=3)
 
-        ct, t = generate_data(ktrans, kep, t0, aif_t, aif_cp)
+        ct, t = generate_data(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
 
-        t = t.squeeze(dim=1)
+        ktrans, kep, t0 = model(ct.transpose(1, 2), acquisition_time)
 
-        ktrans, kep, t0 = model(ct.transpose(1, 2), t)
-
-        # scale = [10, 1, 200]
-        # scale = torch.tensor([10, 1, 200]).view(1, 3).to(ktrans)
         scale = torch.tensor([1, 1, 1]).view(1, 3).to(ktrans)
         output = torch.cat((ktrans, kep, t0), dim=1)
-        loss = (torch.nn.functional.mse_loss(output, params, reduction='none') * scale).mean()
-        # loss = torch.nn.functional.l1_loss(output, params)
+        # loss = torch.nn.functional.mse_loss(output, params)
+        loss = torch.nn.functional.l1_loss(output, params)
 
         optimizer.zero_grad()
         loss.backward()
