@@ -167,7 +167,8 @@ for a1 = 1:numel(filelist)
         end
 
         % by Kai
-        savepath = strcat('../tmp/patient-', string(patient_id), '.mat');
+        savepath = strcat('../tmp/', [filelist(a1).name, '-', flist2(dd).name, '.mat']);
+        disp(['save path: ', savepath])
         patient_id = patient_id + 1;
 
         % compute PK map
