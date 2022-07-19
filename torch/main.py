@@ -84,7 +84,7 @@ if __name__ == '__main__':
                                 osp.splitext(osp.basename(args.config))[0])
     os.makedirs(cfg.work_dir, exist_ok=True)
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
-    
+
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
     logger = get_logger(name="DCE", log_file=log_file)
@@ -225,7 +225,7 @@ if __name__ == '__main__':
             params = param_sampler.sample(batch_size).to(dce_data)
             ktrans, kep, t0 = params.chunk(dim=1, chunks=3)
 
-        ct, t = generate_data(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
+        ct = generate_data(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
 
         ktrans, kep, t0 = model(ct.transpose(1, 2), acquisition_time)
 
