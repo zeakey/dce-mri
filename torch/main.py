@@ -9,6 +9,7 @@ import vlkit.plt as vlplt
 
 from mmcv.cnn import MODELS
 from mmcv.utils import Config, DictAction, get_logger
+from mmcv.runner.utils import set_random_seed
 
 from pharmacokinetic import (
      tofts, np2torch,
@@ -25,6 +26,7 @@ from ct_sampler import CTSampler
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
     parser.add_argument('config', help='train config file path')
+    parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--max-iters', type=lambda x: int(float(x)), default=1e5)
     parser.add_argument('--max-lr', type=float, default=1e-4)
     parser.add_argument('--log-freq', type=int, default=100)
@@ -57,6 +59,7 @@ def generate_data(ktrans, kep, t0, aif_t, aif_cp, t):
     ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
     noice = torch.randn(ct.shape, device=ct.device) / 4
     ct += ct * noice
+    ct[ct < 0] = 0
     return ct
 
 
@@ -73,7 +76,7 @@ if __name__ == '__main__':
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
-    
+
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:
         # update configs according to CLI args if args.work_dir is not None
@@ -89,6 +92,9 @@ if __name__ == '__main__':
     log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
     logger = get_logger(name="DCE", log_file=log_file)
     logger.info(cfg)
+
+    logger.info("Setting random seed to %d" % args.seed)
+    set_random_seed(args.seed)
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -190,9 +196,8 @@ if __name__ == '__main__':
     acquisition_time = acquisition_time / 60
 
     # we assume 7 minutes aif at most
-    aif_t = torch.arange(0, 7, 1/60, dtype=torch.float64).to(acquisition_time)
+    aif_t = torch.arange(0, acquisition_time[-1], 1/60, dtype=torch.float64).to(acquisition_time)
     aif_t = aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
-    max_base = 6
     hct = 0.42
     if cfg.aif == 'parker':
         aif_cp = parker_aif(
@@ -215,23 +220,14 @@ if __name__ == '__main__':
     param_sampler = CTSampler()
 
     for i in range(args.max_iters):
-        if False:
-            ktrans = torch.zeros(batch_size, 1).uniform_(0, 2).to(aif_t)
-            kep = torch.zeros(batch_size, 1).uniform_(0, 2).to(aif_t)
-            t0 = torch.zeros(batch_size, 1).uniform_(0, 0.4).to(aif_t)
-
-            params = torch.stack((ktrans, kep, t0)).squeeze(dim=-1).transpose(0, 1)
-        else:
-            params = param_sampler.sample(batch_size).to(dce_data)
-            ktrans, kep, t0 = params.chunk(dim=1, chunks=3)
+        params = param_sampler.sample(batch_size).to(dce_data)
+        ktrans, kep, t0 = params.chunk(dim=1, chunks=3)
 
         ct = generate_data(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
 
         ktrans, kep, t0 = model(ct.transpose(1, 2), acquisition_time)
 
-        scale = torch.tensor([1, 1, 1]).view(1, 3).to(ktrans)
         output = torch.cat((ktrans, kep, t0), dim=1)
-        # loss = torch.nn.functional.mse_loss(output, params)
         loss = torch.nn.functional.l1_loss(output, params)
 
         optimizer.zero_grad()
@@ -247,6 +243,9 @@ if __name__ == '__main__':
             tensorboard.add_scalar('lr', lr, i)
             tensorboard.add_scalar('loss', loss.mean().item(), i)
 
-    torch.save(model.state_dict(), osp.join(cfg.work_dir, 'model.pth'))
-        # plt.plot(curves[0, 0, :].cpu())
-        # plt.savefig('curve.pdf')
+        if i % 5e3 == 0:
+            torch.save(
+                model.state_dict(),
+                osp.join(cfg.work_dir, 'model-iter%.5d.pth' % i)
+            )
+
