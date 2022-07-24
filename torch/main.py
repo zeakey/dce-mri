@@ -238,7 +238,13 @@ if __name__ == '__main__':
         optimizer.step()
 
         if i % args.log_freq == 0 or i == args.max_iters - 1 or i == 0:
-            logger.info("iter %.3d loss=%.3f  lr=%.2e" % (i, loss.item(), lr))
+            logger.info(
+                "iter {iter} loss={loss}  lr={lr} Ktrans (min={ktrans_min:.2f}, max={ktrans_max:.2f}, mean={ktrans_mean:.2f}), Kep (min={kep_min:.2f}, max={kep_max:.2f}, mean={kep_mean:.2f}), t0 (min={t0_min:.2f}, max={t0_max:.2f}, mean={t0_mean:.2f}) ".format(
+                    iter='%.6d' % i, loss='%.1e' % loss.item(), lr='%.3e' % lr,
+                    ktrans_min=ktrans.min().item(), ktrans_max=ktrans.max().item(), ktrans_mean=ktrans.mean().item(),
+                    kep_min=kep.min().item(), kep_max=kep.max().item(), kep_mean=kep.mean().item(),
+                    t0_min=t0.min().item(), t0_max=t0.max().item(), t0_mean=t0.mean().item(),
+                ))
             tensorboard.add_scalar('lr', lr, i)
             tensorboard.add_scalar('loss', loss.mean().item(), i)
 
