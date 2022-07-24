@@ -31,7 +31,9 @@ class DCETransformer(nn.Module):
         # self.register_buffer('pos_embed0', torch.randn(1, 1, embed_dims))
         # self.register_buffer('pos_embed1', torch.randn(1, 1, embed_dims))
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dims))
+        # self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dims))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dims))
+
         self.drop_after_pos = nn.Dropout(p=drop_rate)
         self.linear = nn.Linear(input_dim, embed_dims)
         self.layers = nn.ModuleList()
@@ -43,7 +45,18 @@ class DCETransformer(nn.Module):
 
         for _ in range(num_layers):
             self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
-    
+
+        self.init_weights()
+
+
+    def init_weights(self):
+        for i in self.layers:
+            i.init_weights()
+        self.ktrans[0].reset_parameters()
+        self.kep[0].reset_parameters()
+        self.t0[0].reset_parameters()
+
+
     def forward(self, x, t=None):
         B = x.shape[0]
 
@@ -60,8 +73,8 @@ class DCETransformer(nn.Module):
         x = self.pos_embed + x
         x = self.drop_after_pos(x)
         
-        for l in self.layers:
-            x = l(x)
+        for layer in self.layers:
+            x = layer(x)
         x = x[:, -1, :]
         # x = x.mean(dim=1)
         
