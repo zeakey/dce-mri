@@ -224,9 +224,11 @@ if __name__ == '__main__':
 
         ct = generate_data(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
 
-        ktrans, kep, t0 = model(ct.transpose(1, 2), acquisition_time)
+        # output: (ktrans, kep, t0)
+        output = model(ct.transpose(1, 2), acquisition_time)
+        assert len(output) == 3
 
-        output = torch.cat((ktrans, kep, t0), dim=1)
+        output = torch.cat(output, dim=1)
         loss = torch.nn.functional.l1_loss(output, params)
 
         optimizer.zero_grad()
