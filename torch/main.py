@@ -9,7 +9,7 @@ import vlkit.plt as vlplt
 
 from mmcv.cnn import MODELS
 from mmcv.utils import Config, DictAction, get_logger
-from mmcv.runner.utils import set_random_seed
+from mmcv.runner import build_optimizer, set_random_seed
 
 from pharmacokinetic import (
      tofts, np2torch,
@@ -102,7 +102,6 @@ if __name__ == '__main__':
         device = torch.device('cpu')
 
     model = MODELS.build(cfg.model)
-
     model = model.to(device)
 
     if args.test:
@@ -147,7 +146,6 @@ if __name__ == '__main__':
         save_slices_to_dicom(data['kep'], dicom_dir=osp.join(cfg.work_dir, 'dicom/Matlab-kep/'), SeriesDescription='Matlab-kep', SeriesNumber=30004)
         save_slices_to_dicom(data['t0'], dicom_dir=osp.join(cfg.work_dir, 'dicom/Matlab-t0/'), SeriesDescription='Matlab-t0', SeriesNumber=30005)
 
-
         compare_results(ktrans, data['ktrans'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 'ktrans.pdf'))
         compare_results(kep, data['kep'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 'kep.pdf'))
         compare_results(t0, data['t0'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 't0.pdf'))
@@ -158,12 +156,8 @@ if __name__ == '__main__':
 
     batch_size = 256
 
-    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, weight_decay=1e-4, momentum=0.9)
-    # optimizer = torch.optim.RMSprop(model.parameters(), lr=1e-3, weight_decay=1e-4, momentum=0.9)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=5e-5)
-
-    # optimizer stolen from https://github.com/open-mmlab/mmclassification/blob/master/configs/_base_/schedules/imagenet_bs1024_adamw_swin.py
-    # optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05, eps=1e-8, betas=(0.9, 0.999))
+    optimizer = build_optimizer(model, cfg.optimizer)
+    logger.info(optimizer)
 
     lrscheduler = CosineScheduler(epoch_iters=args.max_iters, epochs=1, max_lr=args.max_lr, min_lr=args.max_lr*1e-5, warmup_iters=20)
 
@@ -201,12 +195,17 @@ if __name__ == '__main__':
     hct = 0.42
     if cfg.aif == 'parker':
         aif_cp = parker_aif(
-            a1=0.809, a2=0.330,
-            t1=0.17046, t2=0.365,
-            sigma1=0.0563, sigma2=0.132,
-            alpha=1.050, beta=0.1685, s=38.078, tau=0.483,
-            t=aif_t
-            ) / (1 - hct)
+            a1=0.809,
+            a2=0.330,
+            t1=0.17046,
+            t2=0.365,
+            sigma1=0.0563,
+            sigma2=0.132,
+            alpha=1.050,
+            beta=0.1685,
+            s=38.078,
+            tau=0.483,
+            t=acquisition_time) / (1 - hct)
     elif cfg.aif == 'weinmann':
         aif_cp = biexp_aif(3.99, 4.78, 0.144, 0.011, aif_t) / (1 - hct)
     elif cfg.aif == 'fh':
@@ -239,7 +238,7 @@ if __name__ == '__main__':
         optimizer.step()
 
         if i % args.log_freq == 0 or i == args.max_iters - 1 or i == 0:
-            print("iter %.3d loss=%.3f  lr=%.2e" % (i, loss.item(), lr))
+            logger.info("iter %.3d loss=%.3f  lr=%.2e" % (i, loss.item(), lr))
             tensorboard.add_scalar('lr', lr, i)
             tensorboard.add_scalar('loss', loss.mean().item(), i)
 
