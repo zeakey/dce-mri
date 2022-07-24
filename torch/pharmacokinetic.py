@@ -1,4 +1,3 @@
-from email.mime import base
 import torch, math, os, pydicom, warnings
 import os.path as osp
 import numpy as np
@@ -8,7 +7,12 @@ import matplotlib.pyplot as plt
 from einops import rearrange
 from vlkit.lrscheduler import CosineScheduler, MultiStepScheduler
 from torch.utils.tensorboard import SummaryWriter
-from utils import write_dicom, write_dicom_meta
+from utils import (
+    read_dce_folder,
+    find_max_base,
+    gd_concentration,
+    load_dce
+)
 
 
 def parker_aif(a1, a2, t1, t2, sigma1, sigma2, alpha, beta, s, tau, t):
@@ -33,7 +37,7 @@ def tofts(ktrans, kep, t0, t, aif_t, aif_cp):
     kernel to a grouped 1-D convolution.
     """
     assert ktrans.ndim == 2 and kep.ndim == 2 and t0.ndim == 2
-    assert t.ndim == 3 and aif_t.ndim == 3
+    assert t.ndim == 3 and aif_t.ndim == 3, 't.shape=%s, aif_t.shape=%s' % (str(t.shape), str(aif_t.shape))
     h, w = ktrans.shape
     t1, t2 = t.shape[2], aif_t.shape[2]
     dt = aif_t[:, :, 1] - aif_t[:, :, 0]
@@ -41,7 +45,6 @@ def tofts(ktrans, kep, t0, t, aif_t, aif_cp):
     assert t.shape[:2] == torch.Size([h, w])
     assert aif_t.shape[:2] == torch.Size([h, w])
     assert aif_cp.shape[:2] == torch.Size([h, w])
-
 
     # impulse response
     impulse = ktrans.unsqueeze(dim=-1) * (-kep.unsqueeze(dim=-1) * aif_t).exp()
@@ -168,56 +171,6 @@ def process_patient(time, ct, aif_t, aif_cp, max_iter=500, max_lr=1e-3, work_dir
     return params, loss
 
 
-def find_max_base(ct):
-    assert ct.ndim == 4
-    h, w, slices, frames = ct.shape
-
-    x1, x2 = -21 + w // 2, 20 + w // 2
-    y1, y2 = -21 + h // 2, 20 + h // 2
-    center = ct[y1:y2, x1:x2, slices//2-1, :].mean(dim=(0, 1))
-    grad = torch.gradient(center)[0]
-    max_grad_idx = grad.argmax()
-    neg_grad_idx = torch.where(grad[:max_grad_idx] < 0)[0]
-    bnum = neg_grad_idx.max() + 1
-    baseline = center[:bnum+1].mean()
-
-    while center[bnum+1] / baseline < 1.01:
-        bnum += 1
-        baseline = center[:bnum+1].mean()
-    return bnum
-
-
-def gd_concentration(dce, max_base, t10=None, tr=3.89, fa=12):
-    assert dce.ndim == 4
-    fa = 2 * math.pi * fa / 360
-    rr1 = 3.9 # t1 relaxivity at 3T
-    h, w, slices, frames = dce.shape
-    if t10 is None:
-        t10 = torch.ones((h, w, slices), device=dce.device) * 1998
-    # E10 = exp(-tr/t10);
-    e10 = (-tr / t10).exp()
-    # B = (1-E10)/(1-cosd(fa)*E10);
-    b = (1 - e10) / (1 - math.cos(fa) * e10)
-    r10 = (1000.0 / t10).unsqueeze(dim=-1).expand_as(dce)
-
-    mask = torch.zeros((h, w, slices), device=dce.device)
-    threshold = dce[:, :, :, -1].reshape(-1, slices).max(dim=0).values.view(1, 1, -1) * 0.05
-    mask = dce[:, :, :, -1] > threshold
-
-    baseline = dce[:, :, :, :max_base+1].mean(dim=-1, keepdim=True)
-    # baseline[mask] = 1
-
-    enhanced = dce / baseline.expand_as(dce)
-    b_expand = 0.8 / b.unsqueeze(dim=-1).expand_as(enhanced)
-    enhanced = torch.where(enhanced > b_expand, b_expand, enhanced)
-    a = b.unsqueeze(dim=-1) * enhanced
-    r1 = (-1000.0 / tr) * ((1 - a) / (1 - math.cos(fa) * a)).log()
-    concentration = torch.where(r1 > r10, (r1 - r10) / rr1, torch.zeros_like(dce))
-    concentration[:, :, :, :max_base+1] = 0
-    concentration[mask.logical_not()] = 0
-    return concentration
-
-
 def get_ct_curve(params, t, aif_t, aif_cp):
     assert params.ndim == 1 and aif_t.ndim == 1 and aif_cp.ndim == 1
     ktrans = params[0].view(1, 1)
@@ -246,30 +199,6 @@ def compare_results(param1, param2, name1='name1', name2='name2', fig_filename='
     plt.close()
 
 
-def save_slices_to_dicom(data, dicom_dir, **kwargs):
-    """
-    data: [h w slices]
-    """
-    if data.min() < 0:
-        data[data < 0] = 0
-        warnings.warn('Negative values are clipped to 0.')
-
-    data = data.astype(np.float64)
-    data_uint16 = (data * 1000).astype(np.uint16)
-    slices = data_uint16.shape[2]
-    for i in range(slices):
-        origin_dicom = '/data1/IDX_Current/dicom/10042_1_004D6Sy8/20160616/iCAD-MCC-Ktrans-FA-0-E_33009/IM-50068-%.4d.dcm' % (i+1)
-        origin_dicom = pydicom.dcmread(origin_dicom)
-        save_fn = osp.join(dicom_dir, 'slice-%.3d.dcm' % (i+1))
-        img = np.squeeze(data_uint16[:, :, i])
-        thickness = 3.6
-        write_dicom_meta(
-            img,
-            save_fn,
-            ds=origin_dicom,
-            **kwargs
-        )
-
 
 def np2torch(data, device=torch.device('cpu')):
     for k, v in data.items():
@@ -293,6 +222,50 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import time, sys
 
+    dicom_data = read_dce_folder('../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000')
+    dce_data = torch.tensor(dicom_data['data'].astype(np.float32))
+    acquisition_time = torch.tensor(dicom_data['acquisition_time'])
+    repetition_time = torch.tensor(dicom_data['repetition_time'])
+    flip_angle = torch.tensor(dicom_data['flip_angle'])
+
+    max_base = find_max_base(dce_data)
+
+    # important! shift max_base for uniform ct
+    dce_data = dce_data[:, :, :, max_base:]
+    dce_data = torch.cat((
+            dce_data,
+            dce_data[:, :, :, -1:].repeat(1, 1, 1, max_base)
+        ), dim=-1)
+
+    acquisition_time = acquisition_time[max_base:]
+    interval = (acquisition_time[-1] - acquisition_time[0]) / (acquisition_time.numel() - 1)
+
+    acquisition_time = torch.cat((acquisition_time, acquisition_time[-1] + torch.arange(1, max_base+1) * interval), dim=0)
+    acquisition_time = acquisition_time - acquisition_time[0]
+    # second to minite
+    acquisition_time = acquisition_time / 60
+
+    max_base = 0
+
+    ct = gd_concentration(dce_data, max_base=max_base)
+
+    acquisition_time = acquisition_time / 60
+    # supporse maximal aif_time is 7 minutes
+    aif_time = torch.arange(0, 7, 1/60, dtype=torch.float64).to(acquisition_time)
+
+    # dce_data1 = load_dce('../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000')
+    # dce_data2 = load_dce('../dicom/10042_1_3L4Hhlz5/20160919/iCAD-MCC_33000')
+    # dce_data3 = load_dce('../dicom/10042_1_5Xb55H46/20170825/iCAD-MCC_33000')
+    dce_data4 = load_dce('/data1/kzhao/prostate-mri-reorganised/10042_1_003Tnq2B/DCE')
+
+    hct = 0.42
+    aif_cp = parker_aif(
+        a1=0.809, a2=0.330,
+        t1=0.17046, t2=0.365,
+        sigma1=0.0563, sigma2=0.132,
+        alpha=1.050, beta=0.1685, s=38.078, tau=0.483,
+        t=aif_time,
+        ) / (1 - hct)
 
     # save_slices_to_dicom(np.random.randn(160, 160, 20), 'work_dirs/debug', SeriesDescription='PyTorch-Ktrans')
     # sys.exit()
