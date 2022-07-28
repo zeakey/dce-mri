@@ -172,7 +172,7 @@ if __name__ == '__main__':
     aif_t = aif_t.view(1, 1, -1).repeat(batch_size, 1, 1)
     aif_cp = aif_cp.view(1, 1, -1).repeat(batch_size, 1, 1)
 
-    param_sampler = CTSampler()
+    param_sampler = CTSampler(cfg.sampler)
 
     for i in range(args.max_iters):
         params = param_sampler.sample(batch_size).to(dce_data)
