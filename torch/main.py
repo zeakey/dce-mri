@@ -1,4 +1,3 @@
-from multiprocessing.sharedctypes import Value
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
@@ -17,17 +16,18 @@ from pharmacokinetic import (
 from utils import (
     read_dce_folder,
     find_max_base,
-    save_slices_to_dicom
+    save_slices_to_dicom,
+    load_dce
 )
 from aif import parker_aif, biexp_aif
-from ct_sampler import CTSampler
+from ct_sampler import CTSampler, generate_data
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
     parser.add_argument('config', help='train config file path')
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--max-iters', type=lambda x: int(float(x)), default=1e5)
+    parser.add_argument('--max-iters', type=lambda x: int(float(x)), default=5e4)
     parser.add_argument('--max-lr', type=float, default=1e-4)
     parser.add_argument('--log-freq', type=int, default=100)
     parser.add_argument('--test', action='store_true', help='test')
@@ -53,14 +53,32 @@ def train(model, optimizer, lrscheduler):
     pass
 
 
-def generate_data(ktrans, kep, t0, aif_t, aif_cp, t):
-    batch_size = ktrans.shape[0]
-    t = t.view(1, 1, -1).repeat(batch_size, 1, 1)
-    ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
-    noice = torch.randn(ct.shape, device=ct.device) / 4
-    ct += ct * noice
-    ct[ct < 0] = 0
-    return ct
+
+def inference(model, data):
+    assert data.ndim == 4
+    model.eval()
+
+    h, w, s, f = data.shape
+    data = rearrange(data, 'h w s f -> h (w s) f')
+    ktrans = torch.zeros(h, w*s).to(data)
+    kep = torch.zeros(h, w*s).to(data)
+    t0 = torch.zeros(h, w*s).to(data)
+
+    print('Start inference...')
+    tic = time.time()
+    with torch.no_grad():
+        for i, d in enumerate(tqdm(data)):
+            ktrans_, kep_, t0_ = model(d.unsqueeze(dim=-1))
+            ktrans[i, ] = ktrans_.squeeze(dim=1)
+            kep[i, ] = kep_.squeeze(dim=1)
+            t0[i, ] = t0_.squeeze(dim=1)
+    toc = time.time()
+    print('Done, %.3fs elapsed.' % (toc-tic))
+    ktrans = rearrange(ktrans, 'h (w s) -> h w s', w=w)
+    kep = rearrange(kep, 'h (w s) -> h w s', w=w)
+    t0 = rearrange(t0, 'h (w s) -> h w s', w=w)
+    return ktrans, kep, t0
+
 
 
 if __name__ == '__main__':
@@ -103,56 +121,9 @@ if __name__ == '__main__':
 
     model = MODELS.build(cfg.model)
     model = model.to(device)
+    logger.info('Model:\n', model)
 
-    if args.test:
-        assert osp.isfile(args.pretrained)
-        pretrained = torch.load(args.pretrained)
-        model.load_state_dict(pretrained)
-        model.eval()
-
-        data = loadmat('../tmp/patient-0.mat')
-        ct = torch.from_numpy(data['dce_ct']).to(device).float()
-        t = torch.from_numpy(data['time_dce']).to(device).float() / 60
-
-        h, w, s, f = ct.shape
-        ct = rearrange(ct, 'h w s f -> h (w s) f')
-        ktrans = torch.zeros(h, w*s).to(ct)
-        kep = torch.zeros(h, w*s).to(ct)
-        t0 = torch.zeros(h, w*s).to(ct)
-
-        tic = time.time()
-        with torch.no_grad():
-            for i, d in enumerate(tqdm(ct)):
-                ktrans_, kep_, t0_ = model(d.unsqueeze(dim=-1), t)
-                ktrans[i, ] = ktrans_.squeeze(dim=1)
-                kep[i, ] = kep_.squeeze(dim=1)
-                t0[i, ] = t0_.squeeze(dim=1)
-        ct = rearrange(ct, 'h (w s) f -> h w s f', w=w)
-
-        ktrans = rearrange(ktrans, 'h (w s) -> h w s', w=w)
-        kep = rearrange(kep, 'h (w s) -> h w s', w=w)
-        t0 = rearrange(t0, 'h (w s) -> h w s', w=w)
-        print("ETA: %f" % (time.time() - tic))
-
-        ktrans = ktrans.cpu().numpy()
-        kep = kep.cpu().numpy()
-        t0 = t0.cpu().numpy()
-
-        save_slices_to_dicom(ktrans, dicom_dir=osp.join(cfg.work_dir, 'dicom/tansformer-ktrans/'), SeriesDescription='Transformer-ktrans', SeriesNumber=30000)
-        save_slices_to_dicom(kep, dicom_dir=osp.join(cfg.work_dir, 'dicom/tansformer-kep/'), SeriesDescription='Transformer-kep', SeriesNumber=30001)
-        save_slices_to_dicom(t0, dicom_dir=osp.join(cfg.work_dir, 'dicom/tansformer-t0/'), SeriesDescription='Transformer-t0', SeriesNumber=30002)
-        #
-        save_slices_to_dicom(data['ktrans'], dicom_dir=osp.join(cfg.work_dir, 'dicom/Matlab-ktrans/'), SeriesDescription='Matlab-ktrans', SeriesNumber=30003)
-        save_slices_to_dicom(data['kep'], dicom_dir=osp.join(cfg.work_dir, 'dicom/Matlab-kep/'), SeriesDescription='Matlab-kep', SeriesNumber=30004)
-        save_slices_to_dicom(data['t0'], dicom_dir=osp.join(cfg.work_dir, 'dicom/Matlab-t0/'), SeriesDescription='Matlab-t0', SeriesNumber=30005)
-
-        compare_results(ktrans, data['ktrans'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 'ktrans.pdf'))
-        compare_results(kep, data['kep'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 'kep.pdf'))
-        compare_results(t0, data['t0'], name1='Transformer', name2='Matlab', fig_filename=osp.join(cfg.work_dir, 't0.pdf'))
-        sys.exit()
-
-
-    tensorboard = SummaryWriter(osp.join(cfg.work_dir, 'tensorboard'))
+    writer = SummaryWriter(osp.join(cfg.work_dir, 'tensorboard'))
 
     batch_size = 256
 
@@ -170,21 +141,6 @@ if __name__ == '__main__':
     flip_angle = torch.tensor(dicom_data['flip_angle']).to(dce_data)
 
     max_base = find_max_base(dce_data)
-
-    shift_base = False
-    if shift_base:
-        # important! shift max_base for uniform ct
-        dce_data = dce_data[:, :, :, max_base:]
-        dce_data = torch.cat((
-                dce_data,
-                dce_data[:, :, :, -1:].repeat(1, 1, 1, max_base)
-            ), dim=-1)
-
-        acquisition_time = acquisition_time[max_base:]
-        interval = (acquisition_time[-1] - acquisition_time[0]) / (acquisition_time.numel() - 1)
-
-        acquisition_time = torch.cat((acquisition_time, acquisition_time[-1] + torch.arange(1, max_base+1).to(device) * interval), dim=0)
-        acquisition_time = acquisition_time - acquisition_time[0]
 
     # second to minite
     acquisition_time = acquisition_time / 60
@@ -229,7 +185,14 @@ if __name__ == '__main__':
         assert len(output) == 3
 
         output = torch.cat(output, dim=1)
-        loss = torch.nn.functional.l1_loss(output, params)
+        if cfg.loss == 'mse':
+            loss = torch.nn.functional.mse_loss(output, params)
+        elif cfg.loss == 'l1':
+            loss = torch.nn.functional.l1_loss(output, params)
+        elif cfg.loss == 'mixed':
+            loss = (torch.nn.functional.l1_loss(output, params) + torch.nn.functional.mse_loss(output, params)) / 2
+        else:
+            raise TypeError(cfg.loss)
 
         optimizer.zero_grad()
         loss.backward()
@@ -247,12 +210,37 @@ if __name__ == '__main__':
                     kep_min=kep.min().item(), kep_max=kep.max().item(), kep_mean=kep.mean().item(),
                     t0_min=t0.min().item(), t0_max=t0.max().item(), t0_mean=t0.mean().item(),
                 ))
-            tensorboard.add_scalar('lr', lr, i)
-            tensorboard.add_scalar('loss', loss.mean().item(), i)
+            writer.add_scalar('lr', lr, i)
+            writer.add_scalar('loss', loss.mean().item(), i)
 
-        if i % 5e3 == 0:
+        if (i + 1) % 1e4 == 0:
             torch.save(
                 model.state_dict(),
-                osp.join(cfg.work_dir, 'model-iter%.5d.pth' % i)
+                osp.join(cfg.work_dir, 'model-iter%.5d.pth' % (i + 1))
             )
+
+    # test on a patient
+    # dce_data = load_dce('../../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000/')
+    data = loadmat('../tmp/10042_1_1Wnr0444-20161209.mat')
+    data = np2torch(data)
+    ct = data['dce_ct']
+    ktrans, kep, t0 = inference(model, ct.to(device))
+    ktrans = ktrans.cpu()
+    matlab_ktrans = data['ktrans']
+
+    fig, axes = plt.subplots(2, 10, figsize=(20, 4))
+    vlplt.clear_ticks(axes)
+
+    for idx, i in enumerate(range(5, 15)):
+        axes[0, idx].imshow(matlab_ktrans[70:110, 70:100, i])
+        axes[0, idx].set_title('Slice#%.2d' % i)
+        if idx == 0:
+            axes[0, idx].set_ylabel('Matlab (Prostate)')
+        #
+        axes[1, idx].imshow(ktrans[70:110, 70:100, i])
+        if idx == 0:
+            axes[1, idx].set_ylabel('Torch (Prostate)')
+    plt.tight_layout()
+    writer.add_figure('ktrans', fig)
+    writer.close()
 
