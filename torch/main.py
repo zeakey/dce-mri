@@ -128,8 +128,6 @@ if __name__ == '__main__':
     batch_size = 256
 
     optimizer = build_optimizer(model, cfg.optimizer)
-    logger.info(optimizer)
-
     lrscheduler = CosineScheduler(epoch_iters=args.max_iters, epochs=1, max_lr=args.max_lr, min_lr=args.max_lr*1e-5, warmup_iters=20)
 
     # read data
@@ -147,7 +145,6 @@ if __name__ == '__main__':
 
     # we assume 7 minutes aif at most
     aif_t = torch.arange(0, acquisition_time[-1], 1/60, dtype=torch.float64).to(acquisition_time)
-    aif_t = aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
     hct = 0.42
     if cfg.aif == 'parker':
         aif_cp = parker_aif(
@@ -161,11 +158,24 @@ if __name__ == '__main__':
             beta=0.1685,
             s=38.078,
             tau=0.483,
-            t=acquisition_time) / (1 - hct)
+            t=aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
+        ) / (1 - hct)
     elif cfg.aif == 'weinmann':
-        aif_cp = biexp_aif(3.99, 4.78, 0.144, 0.011, aif_t) / (1 - hct)
+        aif_cp = biexp_aif(
+            3.99,
+            4.78,
+            0.144,
+            0.011,
+            aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
+        ) / (1 - hct)
     elif cfg.aif == 'fh':
-        aif_cp = biexp_aif(24, 6.2, 3.0, 0.016, aif_t) / (1 - hct)
+        aif_cp = biexp_aif(
+            24,
+            6.2,
+            3.0,
+            0.016,
+            aif_t
+        ) / (1 - hct)
     else:
         raise ValueError('Invalid AIF: %s' % cfg.aif)
 
