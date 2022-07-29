@@ -36,7 +36,9 @@ def generate_data(ktrans, kep, t0, aif_t, aif_cp, t):
     batch_size = ktrans.shape[0]
     t = t.view(1, 1, -1).repeat(batch_size, 1, 1)
     ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
-    noice = torch.randn(ct.shape, device=ct.device) / 4
-    ct += ct * noice
-    ct[ct < 0] = 0
-    return ct
+
+    ct_noise = torch.randn(ct.shape, device=ct.device) / 4
+    ct_noise = ct + ct * ct_noise
+    ct_noise[ct_noise < 0] = 0
+
+    return ct.transpose(1, 2), ct_noise.transpose(1, 2)

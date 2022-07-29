@@ -48,14 +48,10 @@ class DCETransformer(nn.Module):
 
         self.init_weights()
 
-
     def init_weights(self):
-        for i in self.layers:
-            i.init_weights()
-        self.ktrans[0].reset_parameters()
-        self.kep[0].reset_parameters()
-        self.t0[0].reset_parameters()
-
+        nn.init.normal_(self.ktrans[0].weight, std=0.01)
+        nn.init.normal_(self.kep[0].weight, std=0.01)
+        nn.init.normal_(self.t0[0].weight, std=0.01)
 
     def forward(self, x, t=None):
         B = x.shape[0]
@@ -82,6 +78,67 @@ class DCETransformer(nn.Module):
         kep = self.kep(x)
         t0 = self.t0(x)
         return ktrans, kep, t0
+
+
+@MODELS.register_module()
+class DenoiseTransformer(nn.Module):
+    def __init__(
+        self,
+        seq_len,
+        use_grad=False,
+        num_layers=2,
+        embed_dims=32,
+        num_heads=2,
+        feedforward_channels=32,
+        drop_rate=0
+        ) -> None:
+
+        super().__init__()
+        self.use_grad = use_grad
+
+        if self.use_grad:
+            input_dim = 2
+        else:
+            input_dim = 1
+
+        # position embeding for start and end time step
+        self.register_buffer('pos_embed', torch.randn(1, seq_len, embed_dims))
+        # self.register_buffer('pos_embed0', torch.randn(1, 1, embed_dims))
+        # self.register_buffer('pos_embed1', torch.randn(1, 1, embed_dims))
+
+        self.drop_after_pos = nn.Dropout(p=drop_rate)
+        self.linear = nn.Linear(input_dim, embed_dims)
+        self.layers = nn.ModuleList()
+
+        for _ in range(num_layers):
+            self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
+
+        self.denoise = nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU())
+
+        self.init_weights()
+
+    def init_weights(self):
+        for layer in self.layers:
+            layer.init_weights()
+        self.denoise[0].reset_parameters()
+
+    def forward(self, x, t=None):
+        B = x.shape[0]
+
+        if self.use_grad:
+            # gradient of series
+            grad = torch.gradient(x, dim=1)[0]
+            x = torch.cat((x, grad), dim=2)
+
+        x = self.linear(x)
+
+        x = self.pos_embed + x
+        x = self.drop_after_pos(x)
+
+        for layer in self.layers:
+            x = layer(x)
+        x = self.denoise(x)
+        return x
 
 
 if __name__ == '__main__':
