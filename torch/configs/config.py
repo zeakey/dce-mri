@@ -30,15 +30,15 @@ sampler = dict(
     ),
     kep_sampler = dict(
         type='Beta',
-        scale=1,
+        scale=10,
         concentration1=1.3,
         concentration0=20,
     ),
     t0_sampler = dict(
-        type='Beta',
+        type='Uniform',
         scale=1,
-        concentration1=1,
-        concentration0=1,
+        low=0,
+        high=0.25,
     ),
 )
 
