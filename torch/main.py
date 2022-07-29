@@ -1,7 +1,7 @@
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
-import os, sys, argparse, time
+import os, sys, argparse, time, math
 from einops import rearrange
 from tqdm import tqdm
 import vlkit.plt as vlplt
@@ -178,19 +178,42 @@ if __name__ == '__main__':
         params = param_sampler.sample(batch_size).to(dce_data)
         ktrans, kep, t0 = params.chunk(dim=1, chunks=3)
 
-        ct = generate_data(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
+        ct, ct_noise = generate_data(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
+        if hasattr(cfg, 'debug') and cfg.debug:
+            n = 20
+            cols = 10
+            rows = int(math.ceil(n // 10))
+            fig, axes = plt.subplots(rows, cols, figsize=(cols*2, rows*2))
+            indice = np.random.choice(ct.shape[0], n)
+            ct_ = ct.cpu().numpy()
+            ct_noise_ = ct_noise.cpu().numpy()
 
-        # output: (ktrans, kep, t0)
-        output = model(ct.transpose(1, 2), acquisition_time)
-        assert len(output) == 3
+            for ind, i in enumerate(indice):
+                r, c = ind // cols, ind % cols
+                axes[r, c].plot(ct_[i, :].flatten(), 'blue')
+                axes[r, c].plot(ct_noise_[i, :].flatten(), 'red')
+                axes[r, c].grid()
+                axes[r, c].set_title('%.2f|%.2f|%.2f' % (ktrans[i].item(), kep[i].item(), t0[i].item()))
+            plt.tight_layout()
+            fn = osp.join(cfg.work_dir, 'debug', 'curves-iter%d.jpg' % i)
+            os.makedirs(osp.dirname(fn), exist_ok=True)
+            plt.savefig(fn)
 
-        output = torch.cat(output, dim=1)
+        output = model(ct_noise)
+
+        if hasattr(cfg, 'denoise') and cfg.denoise:
+            target = ct
+        else:
+            assert len(output) == 3
+            output = torch.cat(output, dim=1)
+            target = params
+
         if cfg.loss == 'mse':
-            loss = torch.nn.functional.mse_loss(output, params)
+            loss = torch.nn.functional.mse_loss(output, target)
         elif cfg.loss == 'l1':
-            loss = torch.nn.functional.l1_loss(output, params)
+            loss = torch.nn.functional.l1_loss(output, target)
         elif cfg.loss == 'mixed':
-            loss = (torch.nn.functional.l1_loss(output, params) + torch.nn.functional.mse_loss(output, params)) / 2
+            loss = (torch.nn.functional.l1_loss(output, target) + torch.nn.functional.mse_loss(output, target)) / 2
         else:
             raise TypeError(cfg.loss)
 
