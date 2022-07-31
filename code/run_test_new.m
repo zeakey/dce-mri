@@ -1,4 +1,4 @@
-function res = run_test_new(ct, time, maxBase, mode)
+function res = run_test_new(ct, time, maxBase, mode, aif_type)
 
 [nx, ny, nz, ~] = size(ct);
 
@@ -7,12 +7,22 @@ tdel = 1/60;
 tp   = (0:tdel:time(end));
 tp   = tp(:);
 
-% Assumed Parker AIF
 Hct = 0.42;
-cp_parker = parker_aif(0.809,0.330,0.17046,0.365,0.0563,0.132,1.050, ...
-    0.1685,38.078,0.483,tp-ceil(time(maxBase)/tdel)*tdel)/(1-Hct);
+% Assumed Parker AIF
+switch aif_type
+    case 'parker'
+        aif_cp = parker_aif(0.809,0.330,0.17046,0.365,0.0563,0.132,1.050, ...
+            0.1685,38.078,0.483,tp-ceil(time(maxBase)/tdel)*tdel)/(1-Hct);
+    case 'weinmann'
+        aif_cp = biexp_aif(3.99, 4.78, 0.144, 0.011, tp-ceil(0.25/tdel)*tdel)/(1-Hct); % Weinmann
+    case 'fh'
+        aif_cp = biexp_aif(24, 6.2, 3.0, 0.016, tp-ceil(0.25/tdel)*tdel)/(1-Hct); % Fritz-Hans
+    otherwise
+        error(['bad aif_type: ', aif_type])
+end
 
-aif_init = [tp cp_parker];
+
+aif_init = [tp aif_cp];
 
 % Initial Guess
 center_area = 6;

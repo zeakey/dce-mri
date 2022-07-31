@@ -1,5 +1,7 @@
 clear all; clc; close all;
 
+aif_type = 'parker';
+
 write_dicom = 1;
 dr1 = '../dicom/';
 dr2 = '../dicom_pk/';
@@ -7,8 +9,6 @@ dr2 = '../dicom_pk/';
 filelist = dir(dr1);
 filelist(ismember( {filelist.name}, {'.', '..', '.DS_Store'})) = [];  %remove . and ..
 filelist = filelist([filelist.isdir]);
-
-patient_id = 0;
 
 %%
 for a1 = 1:numel(filelist)
@@ -167,13 +167,14 @@ for a1 = 1:numel(filelist)
         end
 
         % by Kai
-        savepath = strcat('../tmp/', [filelist(a1).name, '-', flist2(dd).name, '.mat']);
+        savepath = strcat('../tmp/', aif_type, '_aif/', [filelist(a1).name, '-', flist2(dd).name, '.mat']);
+        [tmp_folder, ~, ~] = fileparts(savepath);
+        mkdir(tmp_folder);
         disp(['save path: ', savepath])
-        patient_id = patient_id + 1;
 
         % compute PK map
         if ~isfile(savepath)
-            res_tofts = run_test_new(dce_ct, time_dce/60, maxBase, 1);
+            res_tofts = run_test_new(dce_ct, time_dce/60, maxBase, 1, aif_type);
         else
             disp(strcat(['file', savepath, ' exists, continue!']))
             continue
