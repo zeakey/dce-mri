@@ -1,3 +1,5 @@
+from multiprocessing import reduction
+from load_dce import read_dce_dicoms
 import torch, math, os, pydicom, warnings
 import os.path as osp
 import numpy as np
@@ -8,10 +10,8 @@ from einops import rearrange
 from vlkit.lrscheduler import CosineScheduler, MultiStepScheduler
 from torch.utils.tensorboard import SummaryWriter
 from utils import (
-    read_dce_folder,
     find_max_base,
     gd_concentration,
-    load_dce
 )
 
 
@@ -42,9 +42,9 @@ def tofts(ktrans, kep, t0, t, aif_t, aif_cp):
     t1, t2 = t.shape[2], aif_t.shape[2]
     dt = aif_t[:, :, 1] - aif_t[:, :, 0]
 
-    assert t.shape[:2] == torch.Size([h, w])
-    assert aif_t.shape[:2] == torch.Size([h, w])
-    assert aif_cp.shape[:2] == torch.Size([h, w])
+    assert t.shape[:2] == torch.Size([h, w]), t.shape
+    assert aif_t.shape[:2] == torch.Size([h, w]), aif_t.shape
+    assert aif_cp.shape[:2] == torch.Size([h, w]), aif_cp.shape
 
     # impulse response
     impulse = ktrans.unsqueeze(dim=-1) * (-kep.unsqueeze(dim=-1) * aif_t).exp()
@@ -74,6 +74,28 @@ def tofts(ktrans, kep, t0, t, aif_t, aif_cp):
     # matlab mean(interp) = 0.3483
     interp = rearrange(interp, '1 1 (h w) t1 -> h w t1', h=h, w=w, t1=t1)
     return interp
+
+
+def tofts3d(ktrans, kep, t0, t, aif_t, aif_cp):
+    """
+    Tofts model on 3D volune
+    """
+    assert ktrans.ndim == 3
+    assert ktrans.shape == kep.shape == t0.shape
+    assert aif_t.ndim == 4
+    assert aif_cp.shape == aif_t.shape
+    h, w, slices = ktrans.shape
+    ktrans = rearrange(ktrans, 'h w s -> h (w s)')
+    kep = rearrange(kep, 'h w s -> h (w s)')
+    t0 = rearrange(t0, 'h w s -> h (w s)')
+    #
+    t = rearrange(t, 'h w s t -> h (w s) t')
+    aif_t = rearrange(aif_t, 'h w s t -> h (w s) t')
+    aif_cp = rearrange(aif_cp, 'h w s t -> h (w s) t')
+
+    ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
+    return rearrange(ct, 'h (w s) t -> h w s t', w=w, s=slices)
+
 
 
 def fit_slice(
@@ -171,6 +193,20 @@ def process_patient(time, ct, aif_t, aif_cp, max_iter=500, max_lr=1e-3, work_dir
     return params, loss
 
 
+def calculate_reconstruction_loss(ktrans, kep, t0, ct, t, aif_t, aif_cp):
+    assert ktrans.ndim == 3
+    assert ktrans.shape == kep.shape == t0.shape
+    h, w, slices, frames = ct.shape
+    assert t.numel() == frames
+    t = t.view(1, 1, 1, -1).repeat(h, w, slices, 1).to(ktrans)
+    aif_t = aif_t.view(1, 1, 1, -1).repeat(h, w, slices, 1).to(ktrans)
+    aif_cp = aif_cp.view(1, 1, 1, -1).repeat(h, w, slices, 1).to(ktrans)
+    reconstruction = tofts3d(ktrans, kep, t0, t, aif_t, aif_cp)
+    loss = torch.nn.functional.l1_loss(reconstruction, ct.to(ktrans), reduction='none')
+    loss = loss.mean(dim=-1)
+    return loss
+
+
 def get_ct_curve(params, t, aif_t, aif_cp):
     assert params.ndim == 1 and aif_t.ndim == 1 and aif_cp.ndim == 1
     ktrans = params[0].view(1, 1)
@@ -222,7 +258,7 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import time, sys
 
-    dicom_data = read_dce_folder('../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000')
+    dicom_data = read_dce_dicoms('../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000')
     dce_data = torch.tensor(dicom_data['data'].astype(np.float32))
     acquisition_time = torch.tensor(dicom_data['acquisition_time'])
     repetition_time = torch.tensor(dicom_data['repetition_time'])

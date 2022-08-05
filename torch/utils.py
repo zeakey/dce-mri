@@ -1,70 +1,17 @@
 import torch, math
 import numpy as np
-import pydicom, os, warnings
+import pydicom, os, warnings, time
 import os.path as osp
 from pydicom.dataset import Dataset
 from vlkit.image import norm01
 from einops import rearrange
+from tqdm import tqdm
+
+from aif import parker_aif, biexp_aif
 
 
-def load_dce(folder, shift_max_base=False):
-    data = read_dce_folder(folder)
-    dce_data = torch.tensor(data['data'].astype(np.float32))
-    acquisition_time = torch.tensor(data['acquisition_time'])
-    repetition_time = torch.tensor(data['repetition_time'])
-    flip_angle = torch.tensor(data['flip_angle'])
-
-    max_base = find_max_base(dce_data)
-
-    if shift_max_base:
-        # important! shift max_base for uniform ct
-        dce_data = dce_data[:, :, :, max_base:]
-        dce_data = torch.cat((
-                dce_data,
-                dce_data[:, :, :, -1:].repeat(1, 1, 1, max_base)
-            ), dim=-1)
-
-        acquisition_time = acquisition_time[max_base:]
-        interval = (acquisition_time[-1] - acquisition_time[0]) / (acquisition_time.numel() - 1)
-
-        acquisition_time = torch.cat((acquisition_time, acquisition_time[-1] + torch.arange(1, max_base+1) * interval), dim=0)
-        max_base = 0
-
-    # second to minite
-    acquisition_time = acquisition_time - acquisition_time[0]
-    acquisition_time = acquisition_time / 60
-
-    ct = gd_concentration(dce_data, max_base=0)
-
-    return dict(
-        ct=ct,
-        flip_angle=flip_angle,
-        repetition_time=repetition_time,
-        acquisition_time=acquisition_time,
-        max_base=max_base,
-    )
-
-
-def read_dce_folder(folder):
-    dicoms = sorted([i for i in os.listdir(folder) if i.endswith('dcm') or i.endswith('dicom')])
-    data = []
-    flip_angle = []
-    repetition_time = []
-    acquisition_time = []
-    for d in dicoms:
-        ds = pydicom.dcmread(osp.join(folder, d))
-        acquisition_time.append(60 * (float(ds.AcquisitionTime[0:2]) * 60 + float(ds.AcquisitionTime[2:4])) + float(ds.AcquisitionTime[4:]))
-        data.append(ds.pixel_array)
-        flip_angle.append(float(ds.FlipAngle))
-        repetition_time.append(float(ds.RepetitionTime))
-    acquisition_time = np.array(acquisition_time).reshape(75, 20)[:, 0]
-    data = np.stack(data, axis=-1)
-    h, w, _ = data.shape
-    data = rearrange(data, 'h w (frames slices) -> h w slices frames', h=h, w=w, slices=20, frames=75)
-    flip_angle = np.array(flip_angle)
-    repetition_time = np.array(repetition_time)
-    return dict(data=data, flip_angle=flip_angle, repetition_time=repetition_time, acquisition_time=acquisition_time)
-
+def str2int(s):
+    return int.from_bytes(s.encode(), 'little')
 
 def find_max_base(ct):
     assert ct.ndim == 4
@@ -82,7 +29,7 @@ def find_max_base(ct):
     while center[bnum+1] / baseline < 1.01:
         bnum += 1
         baseline = center[:bnum+1].mean()
-    return bnum
+    return bnum, center, grad
 
 
 def  normalize_dce(folder):
@@ -162,7 +109,7 @@ def save_slices_to_dicom(data, dicom_dir, SeriesDescription, **kwargs):
     data = data.astype(np.float64)
     data_uint16 = (data * 1000).astype(np.uint16)
     slices = data_uint16.shape[2]
-    example_dicom_dir = osp.join(osp.dirname(__file__), '../example-dicom', ftype)
+    example_dicom_dir = '/data1/IDX_Current/dicom/10042_1_004D6Sy8/20160616/iCAD-MCC-Ktrans-FA-0-E_33009/'
     example_dicoms = sorted([osp.join(example_dicom_dir, i) for i in os.listdir(example_dicom_dir) if i.endswith('dcm')])
     for i in range(slices):
         dicom = example_dicoms[i]
@@ -193,3 +140,67 @@ def write_dicom(array, filename, ds, **kwargs):
     ds.PixelData = array.tobytes()
 
     ds.save_as(filename, write_like_original=False)
+
+
+# model related
+def inference(model, data):
+    assert data.ndim == 4
+    model.eval()
+
+    h, w, s, f = data.shape
+    data = rearrange(data, 'h w s f -> h (w s) f')
+    ktrans = torch.zeros(h, w*s).to(data)
+    kep = torch.zeros(h, w*s).to(data)
+    t0 = torch.zeros(h, w*s).to(data)
+
+    print('Start inference...')
+    tic = time.time()
+    with torch.no_grad():
+        for i, d in enumerate(tqdm(data)):
+            ktrans_, kep_, t0_ = model(d.unsqueeze(dim=-1))
+            ktrans[i, ] = ktrans_.squeeze(dim=1)
+            kep[i, ] = kep_.squeeze(dim=1)
+            t0[i, ] = t0_.squeeze(dim=1)
+    toc = time.time()
+    print('Done, %.3fs elapsed.' % (toc-tic))
+    ktrans = rearrange(ktrans, 'h (w s) -> h w s', w=w)
+    kep = rearrange(kep, 'h (w s) -> h w s', w=w)
+    t0 = rearrange(t0, 'h (w s) -> h w s', w=w)
+    return ktrans, kep, t0
+
+
+def get_aif(aif: str, acquisition_time: torch.Tensor, max_base: int, hct: float=0.42):
+    assert aif in ['parker', 'weinmann', 'fh']
+    aif_t = torch.arange(0, acquisition_time[-1], 1/60).to(acquisition_time)
+
+    if aif == 'parker':
+        aif_cp = parker_aif(
+            a1=0.809,
+            a2=0.330,
+            t1=0.17046,
+            t2=0.365,
+            sigma1=0.0563,
+            sigma2=0.132,
+            alpha=1.050,
+            beta=0.1685,
+            s=38.078,
+            tau=0.483,
+            t=aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
+        ) / (1 - hct)
+    elif aif == 'weinmann':
+        aif_cp = biexp_aif(
+            3.99,
+            4.78,
+            0.144,
+            0.011,
+            aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
+        ) / (1 - hct)
+    elif aif == 'fh':
+        aif_cp = biexp_aif(
+            24,
+            6.2,
+            3.0,
+            0.016,
+            aif_t
+        ) / (1 - hct)
+    return aif_cp, aif_t
