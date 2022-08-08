@@ -1,3 +1,4 @@
+from genericpath import isdir
 import torch, math
 import numpy as np
 import pydicom, os, warnings, time
@@ -86,31 +87,28 @@ def read_dicom_data(path):
     return data
 
 
-def save_slices_to_dicom(data, dicom_dir, SeriesDescription, **kwargs):
+def save_slices_to_dicom(data, dicom_dir, example_dicom=None, **kwargs):
     """
     data: [h w slices]
     """
+    if isinstance(data, torch.Tensor):
+        data = data.cpu().numpy()
+
     if data.min() < 0:
         data[data < 0] = 0
         warnings.warn('Negative values are clipped to 0.')
-    
-    kwargs['SeriesDescription'] = SeriesDescription
-
-    # identify file type from SeriesDescription
-    if 'ktrans' in SeriesDescription.lower():
-        ftype = 'ktrans'
-    elif 'kep' in SeriesDescription.lower():
-        ftype = 'kep'
-    elif 't0' in SeriesDescription.lower():
-        ftype = 't0'
-    else:
-        warnings.warn('cannot identify ftype from SeriesDescription=%s' % SeriesDescription)
 
     data = data.astype(np.float64)
     data_uint16 = (data * 1000).astype(np.uint16)
     slices = data_uint16.shape[2]
-    example_dicom_dir = '/data1/IDX_Current/dicom/10042_1_004D6Sy8/20160616/iCAD-MCC-Ktrans-FA-0-E_33009/'
-    example_dicoms = sorted([osp.join(example_dicom_dir, i) for i in os.listdir(example_dicom_dir) if i.endswith('dcm')])
+    if example_dicom is None:
+        example_dicoms = '/data1/IDX_Current/dicom/10042_1_004D6Sy8/20160616/iCAD-MCC-Ktrans-FA-0-E_33009/'
+
+    if osp.isdir(example_dicom):
+        example_dicoms = sorted([osp.join(example_dicom, i) for i in os.listdir(example_dicom) if i.endswith('dcm')])
+    else:
+        raise ValueError
+
     for i in range(slices):
         dicom = example_dicoms[i]
         dicom = pydicom.dcmread(dicom)
