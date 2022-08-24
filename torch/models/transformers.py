@@ -139,6 +139,75 @@ class DenoiseTransformer(nn.Module):
             x = layer(x)
         x = self.denoise(x)
         return x
+    
+
+@MODELS.register_module()
+class DCETransformerIterative(nn.Module):
+    def __init__(
+        self,
+        seq_len=75,
+        num_layers=2,
+        embed_dims=32,
+        num_heads=2,
+        feedforward_channels=32,
+        drop_rate=0
+        ) -> None:
+
+        super().__init__()
+
+        input_dim = 3
+
+        # position embeding for start and end time step
+        self.register_buffer('pos_embed', torch.randn(1, seq_len+1, embed_dims))
+        # self.register_buffer('pos_embed0', torch.randn(1, 1, embed_dims))
+        # self.register_buffer('pos_embed1', torch.randn(1, 1, embed_dims))
+
+        # self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dims))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dims))
+
+        self.drop_after_pos = nn.Dropout(p=drop_rate)
+        self.linear = nn.Linear(input_dim, embed_dims)
+        self.layers = nn.ModuleList()
+
+        # use ReLU to prevent negative outputs
+        self.ktrans = nn.Linear(embed_dims, 1)
+        self.kep = nn.Linear(embed_dims, 1)
+        self.t0 = nn.Linear(embed_dims, 1)
+
+        for _ in range(num_layers):
+            self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
+
+        self.init_weights()
+
+    def init_weights(self):
+        nn.init.normal_(self.ktrans.weight, std=0.01)
+        nn.init.normal_(self.kep.weight, std=0.01)
+        nn.init.normal_(self.t0.weight, std=0.01)
+
+    def forward(self, x, t=None):
+        B = x.shape[0]
+        
+        ct, reference = x.chunk(dim=2, chunks=2)
+        residual = reference - ct
+        x = torch.cat((ct, reference, residual), dim=2)
+
+        x = self.linear(x)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((x, cls_tokens), dim=1)
+
+        x = self.pos_embed + x
+        x = self.drop_after_pos(x)
+        
+        for layer in self.layers:
+            x = layer(x)
+        x = x[:, -1, :]
+        # x = x.mean(dim=1)
+        
+        ktrans = self.ktrans(x)
+        kep = self.kep(x)
+        t0 = self.t0(x)
+        return ktrans, kep, t0
 
 
 if __name__ == '__main__':
