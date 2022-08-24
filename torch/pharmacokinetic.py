@@ -1,5 +1,4 @@
 from multiprocessing import reduction
-from load_dce import read_dce_dicoms
 import torch, math, os, pydicom, warnings
 import os.path as osp
 import numpy as np
@@ -8,94 +7,8 @@ matplotlib.use('agg')
 import matplotlib.pyplot as plt
 from einops import rearrange
 from vlkit.lrscheduler import CosineScheduler, MultiStepScheduler
-from torch.utils.tensorboard import SummaryWriter
-from utils import (
-    find_max_base,
-    gd_concentration,
-)
 
-
-def parker_aif(a1, a2, t1, t2, sigma1, sigma2, alpha, beta, s, tau, t):
-    """
-    The parker artierial input function
-    """
-    aif = a1 / (sigma1 * math.sqrt(2 * math.pi)) * (-(t - t1) ** 2 / (2 * sigma1 ** 2)).exp() + \
-          a2 / (sigma2 * math.sqrt(2 * math.pi)) * (-(t - t2) ** 2 / (2 * sigma2 ** 2)).exp() + \
-          alpha * (-beta * t).exp() / (1 + (-s * (t - tau)).exp())
-    aif[t < 0] = 0
-    return aif
-
-
-def tofts(ktrans, kep, t0, t, aif_t, aif_cp):
-    """
-    Tofts model
-
-    ktrans, kep, t0: [h, w]
-    t: [h, w, t1]
-    aif_t, aif_cp: [h, w, t2]
-    For batch process, here I convert the individual convolution where each case has its own
-    kernel to a grouped 1-D convolution.
-    """
-    assert ktrans.ndim == 2 and kep.ndim == 2 and t0.ndim == 2
-    assert t.ndim == 3 and aif_t.ndim == 3, 't.shape=%s, aif_t.shape=%s' % (str(t.shape), str(aif_t.shape))
-    h, w = ktrans.shape
-    t1, t2 = t.shape[2], aif_t.shape[2]
-    dt = aif_t[:, :, 1] - aif_t[:, :, 0]
-
-    assert t.shape[:2] == torch.Size([h, w]), t.shape
-    assert aif_t.shape[:2] == torch.Size([h, w]), aif_t.shape
-    assert aif_cp.shape[:2] == torch.Size([h, w]), aif_cp.shape
-
-    # impulse response
-    impulse = ktrans.unsqueeze(dim=-1) * (-kep.unsqueeze(dim=-1) * aif_t).exp()
-
-    # rearrange shapes for 1-D convolution
-    # see https://pytorch.org/docs/stable/generated/torch.nn.functional.conv1d.html
-    # for document to `torch.nn.functional.conv1d`
-    aif_cp = rearrange(aif_cp, 'h w t2 -> 1 (h w) t2')
-    impulse = rearrange(impulse, 'h w t2 -> (h w) 1 t2')
-    # convolve the impulse response with AIF
-    conv = torch.nn.functional.conv1d(input=aif_cp, weight=impulse.flip(dims=(-1,)), padding=t2-1, groups=h*w)[:, :, :t2]
-    conv = rearrange(conv, '1 (h w) t2 -> h w t2', h=h, w=w) * dt.view(h, w, 1)
-
-    # interpolate
-    conv = rearrange(conv, 'h w t2 -> 1 1 (h w) t2', h=h, w=w, t2=t2)
-    gridx = ((t - t0.view(h, w, 1)) / dt.view(h, w, 1))
-    gridx = rearrange(gridx, 'h w t1 -> 1 (h w) t1 1')
-    gridy = torch.arange(h*w).view(1, h*w, 1, 1).repeat(1, 1, t1, 1).to(gridx)
-    # normalize to [-1, 1]
-    gridx = gridx / (t2 - 1) * 2 -1
-    if h * w == 1:
-        gridy.fill_(-1)      
-    elif h * w > 1:
-        gridy = gridy / (h * w - 1) * 2 -1
-    grid = torch.cat((gridx, gridy), dim=-1) # shape: [1, h*w, t1, 2]
-    interp = torch.nn.functional.grid_sample(conv, grid, align_corners=True) # shape: [1, 1, h*w, t1]
-    # matlab mean(interp) = 0.3483
-    interp = rearrange(interp, '1 1 (h w) t1 -> h w t1', h=h, w=w, t1=t1)
-    return interp
-
-
-def tofts3d(ktrans, kep, t0, t, aif_t, aif_cp):
-    """
-    Tofts model on 3D volune
-    """
-    assert ktrans.ndim == 3
-    assert ktrans.shape == kep.shape == t0.shape
-    assert aif_t.ndim == 4
-    assert aif_cp.shape == aif_t.shape
-    h, w, slices = ktrans.shape
-    ktrans = rearrange(ktrans, 'h w s -> h (w s)')
-    kep = rearrange(kep, 'h w s -> h (w s)')
-    t0 = rearrange(t0, 'h w s -> h (w s)')
-    #
-    t = rearrange(t, 'h w s t -> h (w s) t')
-    aif_t = rearrange(aif_t, 'h w s t -> h (w s) t')
-    aif_cp = rearrange(aif_cp, 'h w s t -> h (w s) t')
-
-    ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
-    return rearrange(ct, 'h (w s) t -> h w s t', w=w, s=slices)
-
+from tofts import tofts, tofts3d
 
 
 def fit_slice(
@@ -153,7 +66,6 @@ def fit_slice(
     return params.detach(), loss.detach()
 
 
-
 def process_patient(time, ct, aif_t, aif_cp, max_iter=500, max_lr=1e-3, work_dir=None):
     h, w, slices, frames = ct.shape
     center = ct[h//2-6:h//2+6, w//2-6 : w//2+6, slices//2-1, :].mean(dim=(0,1), keepdim=True)
@@ -193,26 +105,90 @@ def process_patient(time, ct, aif_t, aif_cp, max_iter=500, max_lr=1e-3, work_dir
     return params, loss
 
 
+def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
+    assert type(ktrans) == type(kep) == type(t0)
+
+    if isinstance(ktrans, float):
+        ktrans = torch.tensor(ktrans).to(aif_t)
+        kep = torch.tensor(kep).to(aif_t)
+        t0 = torch.tensor(t0).to(aif_t)
+
+    assert ktrans.shape == kep.shape == t0.shape and ktrans.ndim >= 2 and ktrans.ndim <= 4
+    assert  aif_t.numel() == aif_cp.numel() and aif_t.ndim == 1
+
+    orig_shape = list(ktrans.shape)
+
+    ktrans = ktrans.view(-1, 1)
+    kep = kep.view(-1, 1)
+    t0 = t0.view(-1, 1)
+
+    n = ktrans.shape[0]
+
+    t = t.view(1, 1, -1).repeat(n, 1, 1)
+    aif_t = aif_t.view(1, 1, -1).repeat(n, 1, 1)
+    aif_cp = aif_cp.view(1, 1, -1).repeat(n, 1, 1)
+
+    ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
+    signal_len = ct.shape[-1]
+    output_shape = orig_shape + [signal_len]
+    return ct.view(output_shape)
+
+
 def calculate_reconstruction_loss(ktrans, kep, t0, ct, t, aif_t, aif_cp):
-    assert ktrans.ndim == 3
     assert ktrans.shape == kep.shape == t0.shape
-    h, w, slices, frames = ct.shape
-    assert t.numel() == frames
-    t = t.view(1, 1, 1, -1).repeat(h, w, slices, 1).to(ktrans)
-    aif_t = aif_t.view(1, 1, 1, -1).repeat(h, w, slices, 1).to(ktrans)
-    aif_cp = aif_cp.view(1, 1, 1, -1).repeat(h, w, slices, 1).to(ktrans)
-    reconstruction = tofts3d(ktrans, kep, t0, t, aif_t, aif_cp)
-    loss = torch.nn.functional.l1_loss(reconstruction, ct.to(ktrans), reduction='none')
-    loss = loss.mean(dim=-1)
+    ct_recon = evaluate_curve(ktrans, kep, t0, aif_t=aif_t, aif_cp=aif_cp, t=t)
+    loss = torch.nn.functional.l1_loss(ct_recon, ct, reduction='none').mean(dim=-1)
     return loss
 
 
-def get_ct_curve(params, t, aif_t, aif_cp):
-    assert params.ndim == 1 and aif_t.ndim == 1 and aif_cp.ndim == 1
-    ktrans = params[0].view(1, 1)
-    kep = params[1].view(1, 1)
-    t0 = params[2].view(1, 1)
-    return tofts(ktrans, kep, t0, t.view(1, 1, -1), aif_t.view(1, 1, -1), aif_cp.view(1, 1, -1)).view(-1)
+def find_max_base(ct):
+    assert ct.ndim == 4
+    h, w, slices, frames = ct.shape
+
+    x1, x2 = -21 + w // 2, 20 + w // 2
+    y1, y2 = -21 + h // 2, 20 + h // 2
+    center = ct[y1:y2, x1:x2, slices//2-1, :].mean(dim=(0, 1))
+    grad = torch.gradient(center)[0]
+    max_grad_idx = grad.argmax()
+    neg_grad_idx = torch.where(grad[:max_grad_idx] < 0)[0]
+    bnum = neg_grad_idx.max() + 1
+    baseline = center[:bnum+1].mean()
+
+    while center[bnum+1] / baseline < 1.01:
+        bnum += 1
+        baseline = center[:bnum+1].mean()
+    return bnum, center, grad
+
+
+def gd_concentration(dce, max_base, t10=None, tr=3.89, fa=12):
+    assert dce.ndim == 4
+    fa = 2 * math.pi * fa / 360
+    rr1 = 3.9 # t1 relaxivity at 3T
+    h, w, slices, frames = dce.shape
+    if t10 is None:
+        t10 = torch.ones((h, w, slices), device=dce.device) * 1998
+    # E10 = exp(-tr/t10);
+    e10 = (-tr / t10).exp()
+    # B = (1-E10)/(1-cosd(fa)*E10);
+    b = (1 - e10) / (1 - math.cos(fa) * e10)
+    r10 = (1000.0 / t10).unsqueeze(dim=-1).expand_as(dce)
+
+    mask = torch.zeros((h, w, slices), device=dce.device)
+    threshold = dce[:, :, :, -1].reshape(-1, slices).max(dim=0).values.view(1, 1, -1) * 0.05
+    mask = dce[:, :, :, -1] > threshold
+
+    baseline = dce[:, :, :, :max_base+1].mean(dim=-1, keepdim=True)
+    # baseline[mask] = 1
+
+    enhanced = dce / baseline.expand_as(dce)
+    b_expand = 0.8 / b.unsqueeze(dim=-1).expand_as(enhanced)
+    enhanced = torch.where(enhanced > b_expand, b_expand, enhanced)
+    a = b.unsqueeze(dim=-1) * enhanced
+    r1 = (-1000.0 / tr) * ((1 - a) / (1 - math.cos(fa) * a)).log()
+    concentration = torch.where(r1 > r10, (r1 - r10) / rr1, torch.zeros_like(dce))
+    concentration[:, :, :, :max_base+1] = 0
+    concentration[mask.logical_not()] = 0
+    return concentration
 
 
 def compare_results(param1, param2, name1='name1', name2='name2', fig_filename='results.pdf'):
@@ -252,11 +228,13 @@ def np2torch(data, device=torch.device('cpu')):
 
 
 if __name__ == '__main__':
+    from torch.utils.tensorboard import SummaryWriter
     from scipy.io import loadmat, savemat
     import matplotlib
     matplotlib.use('agg')
     import matplotlib.pyplot as plt
     import time, sys
+    from load_dce import read_dce_dicoms
 
     dicom_data = read_dce_dicoms('../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000')
     dce_data = torch.tensor(dicom_data['data'].astype(np.float32))
