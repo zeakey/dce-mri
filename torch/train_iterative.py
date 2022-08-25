@@ -20,6 +20,7 @@ from pharmacokinetic import (
 from utils import (
     save_slices_to_dicom,
     inference,
+    ct_loss,
 )
 from aif import get_aif
 import load_dce
@@ -237,9 +238,9 @@ if __name__ == '__main__':
             loss_func = torch.nn.functional.l1_loss
         else:
             raise TypeError(cfg.loss)
-        
+
         loss_param = loss_func(output, target)
-        loss_ct = loss_func(ct_pred, ct_reference)
+        loss_ct = ct_loss(ct_pred, ct_reference, loss_func=loss_func)
 
         loss = loss_param + loss_ct
 
@@ -261,8 +262,11 @@ if __name__ == '__main__':
                     kep_min=kep.min().item(), kep_max=kep.max().item(), kep_mean=kep.mean().item(),
                     t0_min=t0.min().item(), t0_max=t0.max().item(), t0_mean=t0.mean().item(),
                 ))
-            writer.add_scalar('lr', lr, i)
-            writer.add_scalar('loss', loss.mean().item(), i)
+
+            writer.add_scalar('train/lr', lr, i)
+            writer.add_scalar('train/loss', loss.mean().item(), i)
+            writer.add_scalar('train/loss-param', loss_param.mean().item(), i)
+            writer.add_scalar('train/loss-ct', loss_ct.mean().item(), i)
 
         if (i + 1) % 1e4 == 0:
             torch.save(
