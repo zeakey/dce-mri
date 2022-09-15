@@ -14,11 +14,13 @@ class DCETransformer(nn.Module):
         num_layers=2,
         embed_dims=32,
         num_heads=2,
+        num_outputs=3,
         feedforward_channels=32,
         drop_rate=0
         ) -> None:
 
         super().__init__()
+        self.num_outputs = num_outputs
         self.use_grad = use_grad
 
         if self.use_grad:
@@ -39,9 +41,10 @@ class DCETransformer(nn.Module):
         self.layers = nn.ModuleList()
 
         # use ReLU to prevent negative outputs
-        self.ktrans = nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU())
-        self.kep = nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU())
-        self.t0 = nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU())
+        self.output = nn.ModuleList()
+
+        for _ in range(self.num_outputs):
+            self.output.append(nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU()))
 
         for _ in range(num_layers):
             self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
@@ -49,9 +52,8 @@ class DCETransformer(nn.Module):
         self.init_weights()
 
     def init_weights(self):
-        nn.init.normal_(self.ktrans[0].weight, std=0.01)
-        nn.init.normal_(self.kep[0].weight, std=0.01)
-        nn.init.normal_(self.t0[0].weight, std=0.01)
+        for m in self.output:
+            nn.init.normal_(m[0].weight, std=0.01)
 
     def forward(self, x, t=None):
         B = x.shape[0]
@@ -74,10 +76,11 @@ class DCETransformer(nn.Module):
         x = x[:, -1, :]
         # x = x.mean(dim=1)
         
-        ktrans = self.ktrans(x)
-        kep = self.kep(x)
-        t0 = self.t0(x)
-        return ktrans, kep, t0
+        output = []
+        for m in self.output:
+            output.append(m(x))
+
+        return output
 
 
 @MODELS.register_module()
