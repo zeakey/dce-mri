@@ -1,4 +1,5 @@
-import math, torch
+import math, torch, einops
+from vlkit.ops import conv1d
 
 
 def parker_aif(a1, a2, t1, t2, sigma1, sigma2, alpha, beta, s, tau, t):
@@ -18,10 +19,92 @@ def biexp_aif(a1, a2, m1, m2, t):
     return cb
 
 
+def get_aif(aif: str, acquisition_time: torch.Tensor, max_base: int, hct: float=0.42, device=torch.device('cpu')):
+    assert aif in ['parker', 'weinmann', 'fh']
+    aif_t = torch.arange(0, acquisition_time[-1], 1/60).to(acquisition_time)
+
+    if aif == 'parker':
+        aif_cp = parker_aif(
+            a1=0.809,
+            a2=0.330,
+            t1=0.17046,
+            t2=0.365,
+            sigma1=0.0563,
+            sigma2=0.132,
+            alpha=1.050,
+            beta=0.1685,
+            s=38.078,
+            tau=0.483,
+            t=aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
+        ) / (1 - hct)
+    elif aif == 'weinmann':
+        aif_cp = biexp_aif(
+            3.99,
+            4.78,
+            0.144,
+            0.011,
+            aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
+        ) / (1 - hct)
+    elif aif == 'fh':
+        aif_cp = biexp_aif(
+            24,
+            6.2,
+            3.0,
+            0.016,
+            aif_t
+        ) / (1 - hct)
+    return aif_cp.to(device), aif_t.to(device)
+
+
+def dispersed_aif(aif, aif_t, beta):
+    """
+    dispersed AIF function
+    aif: AIF function, [NxD] tensor
+    aif_t: AIF time, D dimensional vector
+    beta: beta, N dimentional vector
+    """
+    assert aif.ndim == 1 or aif.ndim == 2
+    assert aif.shape == aif_t.shape
+
+    n = beta.numel()
+    beta = beta.view(-1, 1)
+
+    if aif.ndim == 1:
+        aif = einops.repeat(aif, 'd -> n d', n=n)
+        aif_t = einops.repeat(aif_t, 'd -> n d', n=n)
+    else:
+        assert aif.shape[0] == n and aif_t.shape[0] == n
+
+    dt = aif_t[0, 1] - aif_t[0, 0]
+    d = aif.shape[1]
+
+    ht =  aif_t.neg().div(beta).exp().div(beta)
+    ht = ht / ht.sum(dim=1, keepdim=True) / dt
+
+    dispersed_aif =  conv1d(aif, ht) * dt
+    return dispersed_aif[:, :d]
+
+
 if __name__ == '__main__':
-    import matplotlib
+    import matplotlib, sys
     matplotlib.use('agg')
     import matplotlib.pyplot as plt
+    from scipy.io import loadmat
+
+    dispersed_data = loadmat('../tmp/dispersed_aif.mat')
+    print(dispersed_data.keys())
+
+    beta = torch.tensor(dispersed_data['beta_all'], dtype=torch.float).view(-1)
+    aif = torch.tensor(dispersed_data['aif1'], dtype=torch.float)
+    aif_t = aif[:, 0]
+    aif = aif[:, 1]
+
+    d_aif = dispersed_aif(aif, aif_t, beta=beta)
+    print(dispersed_data['aif_dispersed'].shape)
+    print(dispersed_data['aif_dispersed'][:, 1, 1])
+    print(d_aif[1, :])
+
+    sys.exit()
 
     aif_time = torch.arange(0, 7, 1/60) - 0.2
     hct = 0.42
