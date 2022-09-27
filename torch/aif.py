@@ -66,6 +66,7 @@ def dispersed_aif(aif, aif_t, beta):
     assert aif.ndim == 1 or aif.ndim == 2
     assert aif.shape == aif_t.shape
 
+    orig_shape = list(beta.shape)
     n = beta.numel()
     beta = beta.view(-1, 1)
 
@@ -82,7 +83,9 @@ def dispersed_aif(aif, aif_t, beta):
     ht = ht / ht.sum(dim=1, keepdim=True) / dt
 
     dispersed_aif =  conv1d(aif, ht) * dt
-    return dispersed_aif[:, :d]
+    orig_shape.append(dispersed_aif.shape[-1])
+    dispersed_aif = dispersed_aif.view(orig_shape)
+    return dispersed_aif[..., :d]
 
 
 if __name__ == '__main__':
@@ -91,8 +94,26 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     from scipy.io import loadmat
 
+    acquisition_time = torch.linspace(0, 5.28, 75)
+
+    pk_aif, aif_t = get_aif('parker', acquisition_time=acquisition_time, max_base=6)
+    beta = torch.linspace(1e-2, 1, 10)
+    d_aif = dispersed_aif(pk_aif, aif_t, beta=beta)
+
+    legend = []
+    plt.plot(pk_aif)
+    legend.append('Parker AIF')
+
+    for i in range(10):
+        plt.plot(d_aif[i,])
+        legend.append('beta=%.2e' % beta[i])
+    plt.legend(legend)
+    plt.grid()
+    plt.savefig('dispersed_aif.pdf')
+
     dispersed_data = loadmat('../tmp/dispersed_aif.mat')
-    print(dispersed_data.keys())
+    d_aif_matlab = torch.tensor(dispersed_data['aif_dispersed'][:, 1, :]).t()
+    print(d_aif_matlab.shape)
 
     beta = torch.tensor(dispersed_data['beta_all'], dtype=torch.float).view(-1)
     aif = torch.tensor(dispersed_data['aif1'], dtype=torch.float)
@@ -100,9 +121,11 @@ if __name__ == '__main__':
     aif = aif[:, 1]
 
     d_aif = dispersed_aif(aif, aif_t, beta=beta)
-    print(dispersed_data['aif_dispersed'].shape)
-    print(dispersed_data['aif_dispersed'][:, 1, 1])
-    print(d_aif[1, :])
+    print(aif.shape)
+    print(aif.sum())
+    print(d_aif.shape)
+    print(d_aif.sum(dim=1))
+    print(d_aif_matlab.sum(dim=1))
 
     sys.exit()
 

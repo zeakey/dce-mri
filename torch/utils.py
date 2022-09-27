@@ -85,6 +85,30 @@ def write_dicom(array, filename, ds, **kwargs):
     ds.save_as(filename, write_like_original=False)
 
 
+def ct_loss(pred, target, reg_neg=10, loss_func=torch.nn.functional.l1_loss):
+    assert reg_neg >= 0
+    loss = loss_func(pred, target)
+    reg = -reg_neg * ((pred < 0) * pred).mean()
+    return loss + reg
+
+
+def spatial_loss(data, uncertainty, r=3, alpha=-0.1):
+    assert data.ndim == 3
+    loss = torch.zeros_like(data)
+    h, w, c = data.shape
+    sq = (torch.arange(-r, r+1).view(-1, 1) ** 2 + torch.arange(-r, r+1).view(1, -1) ** 2).sqrt().unsqueeze(dim=-1)
+    sq = sq.neg().multiply(0.5).exp().to(data)
+    for y in range(r, h-r):
+        for x in range(r, w-r):
+            data1 = data[y-r:y+r+1, x-r:x+r+1, :]
+            u = uncertainty[y-r:y+r+1, x-r:x+r+1, :]
+            reference = data[y, x].view(1, 1, -1).expand_as(data1)
+            l = torch.nn.functional.mse_loss(data1, reference, reduction='none')
+            l = (l * sq * u).sum(dim=(0, 1))
+            loss[y, x, :] = l
+    return loss
+
+
 # model related
 def inference(model, data, convert2cpu=False):
     assert data.ndim == 5 or data.ndim == 4, data.shape
@@ -94,27 +118,20 @@ def inference(model, data, convert2cpu=False):
 
     h, w, s, f, d = data.shape
     data = rearrange(data, 'h w s f d -> h (w s) f d')
-    ktrans = torch.zeros(h, w*s).to(data)
-    kep = torch.zeros(h, w*s).to(data)
-    t0 = torch.zeros(h, w*s).to(data)
+    output = []
 
     print('Start inference...')
     tic = time.time()
     with torch.no_grad():
         for i, data1 in enumerate(tqdm(data)):
-            ktrans_, kep_, t0_ = model(data1)
-            ktrans[i, ] = ktrans_.squeeze(dim=1)
-            kep[i, ] = kep_.squeeze(dim=1)
-            t0[i, ] = t0_.squeeze(dim=1)
+            out = model(data1)
+            output.append(torch.cat(out, dim=-1))
     toc = time.time()
+    output = torch.cat(output, dim=0).view(h, w, s, -1)
     print('Done, %.3fs elapsed.' % (toc-tic))
-    ktrans = rearrange(ktrans, 'h (w s) -> h w s', w=w)
-    kep = rearrange(kep, 'h (w s) -> h w s', w=w)
-    t0 = rearrange(t0, 'h (w s) -> h w s', w=w)
+
     if convert2cpu:
-        ktrans = ktrans.cpu()
-        kep = kep.cpu()
-        t0 = t0.cpu()
-    return ktrans, kep, t0
+        output = output.cpu()
+    return output
 
 

@@ -107,26 +107,51 @@ def process_patient(time, ct, aif_t, aif_cp, max_iter=500, max_lr=1e-3, work_dir
 
 def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
     assert type(ktrans) == type(kep) == type(t0)
+    assert ktrans.numel() == kep.numel() == t0.numel()
+
+    if ktrans.numel() == 1:
+        ktrans = ktrans.view(1, 1)
+        kep = kep.view(1, 1)
+        t0 = t0.view(1, 1)
 
     if isinstance(ktrans, float):
         ktrans = torch.tensor(ktrans).to(aif_t)
         kep = torch.tensor(kep).to(aif_t)
         t0 = torch.tensor(t0).to(aif_t)
 
+    # unify device
+    kep = kep.to(ktrans)
+    t0 = t0.to(ktrans)
+    aif_t = aif_t.to(ktrans)
+    aif_cp = aif_cp.to(ktrans)
+    t = t.to(ktrans)
+
     assert ktrans.shape == kep.shape == t0.shape and ktrans.ndim >= 2 and ktrans.ndim <= 4
-    assert  aif_t.numel() == aif_cp.numel() and aif_t.ndim == 1
 
     orig_shape = list(ktrans.shape)
 
-    ktrans = ktrans.view(-1, 1)
-    kep = kep.view(-1, 1)
-    t0 = t0.view(-1, 1)
+    # AIFs
+    if aif_cp.ndim == 1:
+        aif_cp = aif_cp.view([1] * len(orig_shape) + [aif_cp.shape[0]])
+        aif_cp = aif_cp.repeat(orig_shape + [1])
+    else:
+        assert list(aif_cp.shape)[:-1] == list(ktrans.shape)
+
+    if aif_t.ndim == 1:
+        aif_t = aif_t.view([1] * len(orig_shape) + [aif_t.shape[0]])
+        aif_t = aif_t.repeat(orig_shape + [1])
+    else:
+        assert list(aif_t.shape)[:-1] == list(ktrans.shape)
+
+
+    ktrans = ktrans.reshape(-1, 1)
+    kep = kep.reshape(-1, 1)
+    t0 = t0.reshape(-1, 1)
+    aif_t = aif_t.reshape(-1, 1, aif_t.shape[-1])
+    aif_cp = aif_cp.reshape(-1, 1, aif_cp.shape[-1])
 
     n = ktrans.shape[0]
-
     t = t.view(1, 1, -1).repeat(n, 1, 1)
-    aif_t = aif_t.view(1, 1, -1).repeat(n, 1, 1)
-    aif_cp = aif_cp.view(1, 1, -1).repeat(n, 1, 1)
 
     ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
     signal_len = ct.shape[-1]
@@ -134,10 +159,14 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
     return ct.view(output_shape)
 
 
-def calculate_reconstruction_loss(ktrans, kep, t0, ct, t, aif_t, aif_cp):
+def calculate_reconstruction_loss(ktrans, kep, t0, ct, t, aif_t, aif_cp, relative=False):
     assert ktrans.shape == kep.shape == t0.shape
     ct_recon = evaluate_curve(ktrans, kep, t0, aif_t=aif_t, aif_cp=aif_cp, t=t)
-    loss = torch.nn.functional.l1_loss(ct_recon, ct, reduction='none').mean(dim=-1)
+    loss = torch.nn.functional.l1_loss(ct_recon, ct, reduction='none').sum(dim=-1)
+    if relative:
+        ct_sum = ct.sum(dim=-1)
+        loss = loss / ct_sum
+        loss[ct.mean(dim=-1) <= 1e-2] = 0
     return loss
 
 
