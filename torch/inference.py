@@ -30,7 +30,7 @@ sys.path.insert(0, '/data1/Code/vlkit/vlkit/medical')
 sys.path.insert(0, '..')
 
 from utils import write_dicom, write_dicom, inference, save_slices_to_dicom, str2int, spatial_loss
-from aif import get_aif, dispersed_aif
+from aif import get_aif, dispersed_aif, interp_aif
 from pharmacokinetic import fit_slice, process_patient, np2torch, evaluate_curve
 import load_dce
 from models import DCETransformer
@@ -52,7 +52,6 @@ def rel_loss(x, y):
     return (l / s).mean()
 
 
-
 if __name__ == '__main__':
     np.random.seed(0)
     mmcv.runner.utils.set_random_seed(0)
@@ -62,8 +61,10 @@ if __name__ == '__main__':
     t2 = read_dicom_array('../dicom/10042_1_003Tnq2B/20180212/t2_tse_tra_320_p2_12/')
     data = loadmat('../tmp/parker_aif/10042_1_003Tnq2B-20180212.mat')
     h, w, c, _ = data['dce_ct'].shape
+
     weinmann_aif, aif_t = get_aif(aif='weinmann', max_base=6, acquisition_time=dce_data['acquisition_time'], device=device)
     parker_aif, _ = get_aif(aif='parker', max_base=6, acquisition_time=dce_data['acquisition_time'], device=device)
+    weinmann_aif *= parker_aif.sum() / weinmann_aif.sum()
 
     x_tl, y_tl, x_br, y_br = 53, 57, 107, 120
     mask = torch.zeros(h, w, c, dtype=bool, device=device)
@@ -116,35 +117,46 @@ if __name__ == '__main__':
     t0_init = t0_init.cpu()
 
     torch.cuda.empty_cache()
+    dtype = torch.float32
 
-    ktrans = ktrans_init.clone().to(device=device)
-    kep = kep_init.clone().to(device=device)
-    t0 = t0_init.clone().to(device=device)
-    beta = torch.ones_like(ktrans).fill_(5e-2)
+    ktrans = ktrans_init.clone().to(device=device, dtype=dtype)
+    kep = kep_init.clone().to(ktrans)
+    t0 = t0_init.clone().to(ktrans)
+    beta = torch.ones_like(ktrans)
+    parker_aif = parker_aif.to(ktrans)
+    aif_t = aif_t.to(ktrans)
+    ct = ct.to(ktrans)
 
     ktrans.requires_grad = True
     kep.requires_grad = True
     beta.requires_grad = True
 
     params = [ktrans, kep, beta]
-    optimizer = torch.optim.RMSprop(params=params, lr=1e-3, momentum=0)
-    max_iters = 20
-    scheduler = CosineScheduler(epoch_iters=max_iters, epochs=1)
+    optimizer = torch.optim.RMSprop(params=params, lr=1e-3)
+    # optimizer = torch.optim.SGD(params=params, lr=1e-4, momentum=0)
+    max_iters = 100
+    scheduler = CosineScheduler(epoch_iters=max_iters, epochs=1, warmup_iters=20, max_lr=1e-3, min_lr=1e-5)
 
     for i in range(max_iters):
-        beta.clamp(5e-2, 0.5)
-        aif_cp = dispersed_aif(parker_aif, aif_t, beta)
+        beta.clamp(0, 1)
+        # aif_cp = dispersed_aif(parker_aif, aif_t, beta)
+        aif_cp = interp_aif(parker_aif, weinmann_aif, beta)
         # aif_cp = parker_aif
         ct1 = evaluate_curve(ktrans, kep, t0, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
-        l = torch.nn.functional.l1_loss(ct1, ct, reduction='none').sum(dim=-1).mean()
+        loss_iter = torch.nn.functional.l1_loss(ct1, ct, reduction='none').sum(dim=-1)
+        l = loss_iter.mean()
         # sl = spatial_loss(ktrans, uncertainty=uncertainty)
         # sl = ((noise_scale > 0.5) * sl).mean()
         sl = 0
 
+        lr = scheduler.step()
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr
+
         (l+sl*100).backward()
         optimizer.step()
         optimizer.zero_grad()
-        print(l.item())
+        print("lr={lr:.2e} loss={loss}".format(lr=lr, loss=l.item()))
     print(aif_cp.shape)
 
     curve_iter = evaluate_curve(ktrans, kep, t0, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
@@ -216,7 +228,6 @@ if __name__ == '__main__':
         axes[idx, j].plot(curve_iter[y1, x1, z1])
         axes[idx, j].set_title('Iter param:\n %.3f %.3f %.3f \n loss=%.3f'  % (params_iter[0], params_iter[1], params_iter[2], loss_iter[y1, x1, z1]))
 
-
         j += 1
         axes[idx, j].plot(aif_cp[y1, x1, z1])
         axes[idx, j].set_title('AIF: $\\beta$=%.3f'  % beta[y1, x1, z1])
@@ -239,9 +250,19 @@ if __name__ == '__main__':
         axes[idx, j].set_title('Ktrans init')
 
         j = j + 1
+        axes[idx, j].imshow(norm01(ktrans[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
+        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
+        axes[idx, j].set_title('Ktrans iter')
+
+        j = j + 1
         axes[idx, j].imshow(norm01(loss_init[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
         axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
         axes[idx, j].set_title('loss_init %.3f' % loss_init[y1, x1, z1])
+
+        j = j + 1
+        axes[idx, j].imshow(norm01(loss_iter[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
+        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
+        axes[idx, j].set_title('loss_iter %.3f' % loss_init[y1, x1, z1])
 
     plt.tight_layout(h_pad=3)
     plt.savefig('relative-loss-10042_1_003Tnq2B.pdf')
