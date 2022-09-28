@@ -88,6 +88,22 @@ def dispersed_aif(aif, aif_t, beta):
     return dispersed_aif[..., :d]
 
 
+def interp_aif(aif1, aif2, beta):
+    assert aif1.shape == aif2.shape
+    if aif1.ndim == 1:
+        shape = [1] * len(beta.shape) + [aif1.shape[0]]
+        aif1 = aif1.view(shape)
+        aif2 = aif2.view(shape)
+
+        aif1 = aif1.repeat(list(beta.shape) + [1])
+        aif2 = aif2.repeat(list(beta.shape) + [1])
+    else:
+        assert list(aif1.shape)[:-1] == beta.shape
+        assert list(aif2.shape)[:-1] == beta.shape
+    beta = beta.unsqueeze(dim=-1)
+    return aif1 * beta + aif2 * (1 - beta)
+
+
 if __name__ == '__main__':
     import matplotlib, sys
     matplotlib.use('agg')
