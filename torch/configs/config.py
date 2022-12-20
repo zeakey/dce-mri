@@ -15,6 +15,7 @@ paramwise_cfg = dict(
     custom_keys={
         '.pos_embed': dict(decay_mult=0.0),
     })
+
 optimizer = dict(
     type='Adam',
     lr=1e-4,
@@ -45,5 +46,7 @@ sampler = dict(
 loss = 'l1'
 
 aif = 'parker'
+
+debug = True
 
 custom_imports = dict(imports=['models'], allow_failed_imports=False)
