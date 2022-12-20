@@ -2,6 +2,9 @@ import math, torch, einops
 from vlkit.ops import conv1d
 
 
+aif_sum = 500
+
+
 def parker_aif(a1, a2, t1, t2, sigma1, sigma2, alpha, beta, s, tau, t):
     """
     The parker artierial input function
@@ -53,7 +56,10 @@ def get_aif(aif: str, acquisition_time: torch.Tensor, max_base: int, hct: float=
             0.016,
             aif_t
         ) / (1 - hct)
-    return aif_cp.to(device), aif_t.to(device)
+    aif_cp = aif_cp.to(device)
+    aif_t = aif_t.to(device)
+    aif_cp = aif_cp / aif_cp.sum() * aif_sum
+    return aif_cp, aif_t
 
 
 def dispersed_aif(aif, aif_t, beta):

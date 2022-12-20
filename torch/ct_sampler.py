@@ -15,8 +15,9 @@ def build_sampler(cfg):
 
 
 class CTSampler(object):
-    def __init__(self, config):
+    def __init__(self, config, device=torch.device('cpu')):
         super().__init__()
+        self.device = device
         self.ktrans_scale = config.ktrans_sampler.pop('scale')
         self.kep_scale = config.kep_sampler.pop('scale')
         self.t0_scale = config.t0_sampler.pop('scale')
@@ -25,20 +26,19 @@ class CTSampler(object):
         self.kep_sampler = build_sampler(config.kep_sampler)
         self.t0_sampler = build_sampler(config.t0_sampler)
 
+        if hasattr(config, 'beta_sampler'):
+            self.beta_sampler = build_sampler(config.beta_sampler)
+        else:
+            self.beta_sampler = False
+
     def sample(self, n):
-        ktrans = self.ktrans_sampler.sample((n, 1)) * self.ktrans_scale
-        kep = self.kep_sampler.sample((n, 1)) * self.kep_scale
-        t0 = self.t0_sampler.sample((n, 1)) * self.t0_scale
-        return torch.cat((ktrans, kep, t0), dim=1)
+        results = dict()
+        results["ktrans"] = self.ktrans_sampler.sample((n, 1)).to(self.device) * self.ktrans_scale
+        results["kep"] = self.kep_sampler.sample((n, 1)).to(self.device) * self.kep_scale
+        results["t0"] = self.t0_sampler.sample((n, 1)).to(self.device) * self.t0_scale
+        if self.beta_sampler:
+            results["beta"] = self.beta_sampler.sample((n, 1)).to(self.device)
+        return results
 
 
-def generate_data(ktrans, kep, t0, aif_t, aif_cp, t):
-    batch_size = ktrans.shape[0]
-    t = t.view(1, 1, -1).repeat(batch_size, 1, 1)
-    ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
 
-    ct_noise = torch.randn(ct.shape, device=ct.device) / 4
-    ct_noise = ct + ct * ct_noise
-    ct_noise[ct_noise < 0] = 0
-
-    return ct.transpose(1, 2), ct_noise.transpose(1, 2)

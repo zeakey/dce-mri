@@ -5,22 +5,29 @@ import os, sys, argparse, time, math
 from einops import rearrange
 from tqdm import tqdm
 import vlkit.plt as vlplt
+from collections import OrderedDict
 
 from mmcv.cnn import MODELS
 from mmcv.utils import Config, DictAction, get_logger
 from mmcv.runner import build_optimizer, set_random_seed
 
 from pharmacokinetic import (
-     tofts, np2torch,
-     compare_results)
-from utils import (
-    read_dce_folder,
+    tofts,
     find_max_base,
-    save_slices_to_dicom,
-    load_dce
+    np2torch,
+    calculate_reconstruction_loss,
+    compare_results,
+    evaluate_curve
 )
-from aif import parker_aif, biexp_aif
-from ct_sampler import CTSampler, generate_data
+from utils import (
+    save_slices_to_dicom,
+    inference,
+    ct_loss,
+    mix_l1_mse_loss
+)
+from aif import get_aif, interp_aif
+from utils import load_dce
+from ct_sampler import CTSampler
 
 
 def parse_args():
@@ -30,9 +37,9 @@ def parse_args():
     parser.add_argument('--max-iters', type=lambda x: int(float(x)), default=5e4)
     parser.add_argument('--max-lr', type=float, default=1e-4)
     parser.add_argument('--log-freq', type=int, default=100)
-    parser.add_argument('--test', action='store_true', help='test')
+    parser.add_argument('--test', type=str, default=None)
     parser.add_argument('--work-dir', type=str)
-    parser.add_argument('--pretrained', type=str, default='./')
+    parser.add_argument('--pretrained', type=str, default=None)
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -51,34 +58,6 @@ def parse_args():
 
 def train(model, optimizer, lrscheduler):
     pass
-
-
-
-def inference(model, data):
-    assert data.ndim == 4
-    model.eval()
-
-    h, w, s, f = data.shape
-    data = rearrange(data, 'h w s f -> h (w s) f')
-    ktrans = torch.zeros(h, w*s).to(data)
-    kep = torch.zeros(h, w*s).to(data)
-    t0 = torch.zeros(h, w*s).to(data)
-
-    print('Start inference...')
-    tic = time.time()
-    with torch.no_grad():
-        for i, d in enumerate(tqdm(data)):
-            ktrans_, kep_, t0_ = model(d.unsqueeze(dim=-1))
-            ktrans[i, ] = ktrans_.squeeze(dim=1)
-            kep[i, ] = kep_.squeeze(dim=1)
-            t0[i, ] = t0_.squeeze(dim=1)
-    toc = time.time()
-    print('Done, %.3fs elapsed.' % (toc-tic))
-    ktrans = rearrange(ktrans, 'h (w s) -> h w s', w=w)
-    kep = rearrange(kep, 'h (w s) -> h w s', w=w)
-    t0 = rearrange(t0, 'h (w s) -> h w s', w=w)
-    return ktrans, kep, t0
-
 
 
 if __name__ == '__main__':
@@ -106,6 +85,74 @@ if __name__ == '__main__':
     os.makedirs(cfg.work_dir, exist_ok=True)
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
 
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
+
+    # model
+    model = MODELS.build(cfg.model).to(device)
+    if args.pretrained is not None:
+        model.load_state_dict(torch.load(args.pretrained))
+
+    # read data
+    dce_data = load_dce.load_dce_data('../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000', device=device)
+    max_base = dce_data['max_base'].item()
+    acquisition_time = dce_data['acquisition_time']
+    matlab_results = loadmat('../tmp/10042_1_1Wnr0444-20161209.mat')
+
+    if cfg.aif != 'mixed':
+        aif_cp, aif_t = get_aif('parker', acquisition_time, max_base, device=device)
+    else:
+        parker_aif, aif_t = get_aif('parker', acquisition_time, max_base, device=device)
+        weinmann_aif, _ = get_aif('weinmann', acquisition_time, max_base, device=device)
+        fh_aif, _ = get_aif('fh', acquisition_time, max_base, device=device)
+    # normalize AIFs
+
+    if args.test is not None:
+        assert osp.isdir(args.test)
+        dce_folders = load_dce.find_dce_folders(args.test)
+        for folder in dce_folders:
+            dce_data = load_dce.load_dce_data(folder)
+            max_base = dce_data['max_base'].item()
+            acquisition_time = dce_data['acquisition_time'].to(device)
+            ct = dce_data['ct'].to(device)
+            ktrans, kep, t0 = inference(model, ct)
+            loss = calculate_reconstruction_loss(ktrans, kep, t0, ct, acquisition_time, aif_t, aif_cp, relative=True)
+
+            shared_kwargs = dict(PatientID=dce_data['patient'].upper(), PatientName=dce_data['patient'].upper())
+            shared_kwargs.update(dce_data['metadata'])
+            save_slices_to_dicom(ktrans.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, dce_data['patient'], 'Parker-ktrans'), SeriesDescription='Parker-ktrans', SeriesNumber=30004, SeriesInstanceUID='30004',**shared_kwargs)
+            save_slices_to_dicom(kep.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, dce_data['patient'], 'Parker-kep'), SeriesDescription='Parker-kep', SeriesNumber=30005, SeriesInstanceUID='30005', **shared_kwargs)
+            save_slices_to_dicom(t0.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, dce_data['patient'], 'Parker-t0'), SeriesDescription='Parker-t0', SeriesNumber=30006, SeriesInstanceUID='30006', **shared_kwargs)
+            save_slices_to_dicom(loss.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, dce_data['patient'], 'Parker-loss'), SeriesDescription='Parker-loss', SeriesNumber=30007, SeriesInstanceUID='30007', **shared_kwargs)
+        sys.exit()
+
+        ktrans, kep, t0 = inference(model, dce_data['ct'])
+        loss = calculate_reconstruction_loss(ktrans, kep, t0, dce_data['ct'], acquisition_time, aif_t, aif_cp)
+
+        shared_kwargs = dict(PatientName='10042_1_1Wnr0444', PatientID='10042_1_1Wnr0444'.upper())
+
+        save_slices_to_dicom(matlab_results['ktrans'], dicom_dir=osp.join(cfg.work_dir, 'dicom/matlab-ktrans/'), SeriesDescription='matlab-ktrans', SeriesNumber=30001, **shared_kwargs)
+        save_slices_to_dicom(matlab_results['kep'], dicom_dir=osp.join(cfg.work_dir, 'dicom/matlab-kep/'), SeriesDescription='matlab-kep', SeriesNumber=30002, **shared_kwargs)
+        save_slices_to_dicom(matlab_results['t0'], dicom_dir=osp.join(cfg.work_dir, 'dicom/matlab-t0/'), SeriesDescription='matlab-t0', SeriesNumber=30003, **shared_kwargs)
+        #
+        save_slices_to_dicom(ktrans.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/Parker-ktrans/'), SeriesDescription='Parker-ktrans', SeriesNumber=30004, **shared_kwargs)
+        save_slices_to_dicom(kep.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/Parker-kep/'), SeriesDescription='Parker-kep', SeriesNumber=30005, **shared_kwargs)
+        save_slices_to_dicom(t0.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/Parker-t0/'), SeriesDescription='Parker-t0', SeriesNumber=30006, **shared_kwargs)
+        save_slices_to_dicom(loss.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/Parker-loss/'), SeriesDescription='Parker-loss', SeriesNumber=30007, **shared_kwargs)
+        #
+        save_slices_to_dicom(ktrans.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/Weinmann-ktrans/'), SeriesDescription='Weinmann-ktrans', SeriesNumber=30008, **shared_kwargs)
+        save_slices_to_dicom(kep.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/Weinmann-kep/'), SeriesDescription='Weinmann-kep', SeriesNumber=30009, **shared_kwargs)
+        save_slices_to_dicom(t0.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/Weinmann-t0/'), SeriesDescription='Weinmann-t0', SeriesNumber=300010, **shared_kwargs)
+        save_slices_to_dicom(loss.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/Weinmann-loss/'), SeriesDescription='Weinmann-loss', SeriesNumber=30011, **shared_kwargs)
+        #
+        save_slices_to_dicom(ktrans.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/FH-ktrans/'), SeriesDescription='FH-ktrans', SeriesNumber=30012, **shared_kwargs)
+        save_slices_to_dicom(kep.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/FH-kep/'), SeriesDescription='FH-kep', SeriesNumber=30013, **shared_kwargs)
+        save_slices_to_dicom(t0.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/FH-t0/'), SeriesDescription='FH-t0', SeriesNumber=30014, **shared_kwargs)
+        save_slices_to_dicom(loss.cpu().numpy(), dicom_dir=osp.join(cfg.work_dir, 'dicom/FH-loss/'), SeriesDescription='FH-loss', SeriesNumber=30015, **shared_kwargs)
+        sys.exit()
+
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
     logger = get_logger(name="DCE", log_file=log_file)
@@ -114,15 +161,6 @@ if __name__ == '__main__':
     logger.info("Setting random seed to %d" % args.seed)
     set_random_seed(args.seed)
 
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
-
-    model = MODELS.build(cfg.model)
-    model = model.to(device)
-    logger.info('Model:\n', model)
-
     writer = SummaryWriter(osp.join(cfg.work_dir, 'tensorboard'))
 
     batch_size = 256
@@ -130,102 +168,71 @@ if __name__ == '__main__':
     optimizer = build_optimizer(model, cfg.optimizer)
     lrscheduler = CosineScheduler(epoch_iters=args.max_iters, epochs=1, max_lr=args.max_lr, min_lr=args.max_lr*1e-5, warmup_iters=20)
 
-    # read data
-    dicom_data = read_dce_folder('../dicom/10042_1_1Wnr0444/20161209/iCAD-MCC_33000')
-    dce_data = torch.tensor(dicom_data['data'].astype(np.float32)).float().to(device=device)
-    acquisition_time = torch.tensor(dicom_data['acquisition_time']).to(dce_data)
-    acquisition_time = acquisition_time - acquisition_time[0]
-    repetition_time = torch.tensor(dicom_data['repetition_time']).to(dce_data)
-    flip_angle = torch.tensor(dicom_data['flip_angle']).to(dce_data)
-
-    max_base = find_max_base(dce_data)
-
-    # second to minite
-    acquisition_time = acquisition_time / 60
-
-    # we assume 7 minutes aif at most
-    aif_t = torch.arange(0, acquisition_time[-1], 1/60, dtype=torch.float64).to(acquisition_time)
-    hct = 0.42
-    if cfg.aif == 'parker':
-        aif_cp = parker_aif(
-            a1=0.809,
-            a2=0.330,
-            t1=0.17046,
-            t2=0.365,
-            sigma1=0.0563,
-            sigma2=0.132,
-            alpha=1.050,
-            beta=0.1685,
-            s=38.078,
-            tau=0.483,
-            t=aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
-        ) / (1 - hct)
-    elif cfg.aif == 'weinmann':
-        aif_cp = biexp_aif(
-            3.99,
-            4.78,
-            0.144,
-            0.011,
-            aif_t - (acquisition_time[max_base] / (1 / 60)).ceil() * (1 / 60)
-        ) / (1 - hct)
-    elif cfg.aif == 'fh':
-        aif_cp = biexp_aif(
-            24,
-            6.2,
-            3.0,
-            0.016,
-            aif_t
-        ) / (1 - hct)
-    else:
-        raise ValueError('Invalid AIF: %s' % cfg.aif)
-
-    aif_t = aif_t.view(1, 1, -1).repeat(batch_size, 1, 1)
-    aif_cp = aif_cp.view(1, 1, -1).repeat(batch_size, 1, 1)
-
-    param_sampler = CTSampler(cfg.sampler)
+    param_sampler = CTSampler(cfg.sampler, device=device)
 
     for i in range(args.max_iters):
-        params = param_sampler.sample(batch_size).to(dce_data)
-        ktrans, kep, t0 = params.chunk(dim=1, chunks=3)
+        params = param_sampler.sample(batch_size)
+        ktrans, kep, t0 = params["ktrans"], params["kep"], params["t0"]
+        params_tensor = torch.cat((ktrans, kep, t0), dim=-1)
+        if cfg.aif == 'mixed':
+            aif_cp = interp_aif(parker_aif, weinmann_aif, beta=params['beta'])
+            params_tensor = torch.cat((params_tensor, params['beta']), dim=-1)
+        ct = evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
 
-        ct, ct_noise = generate_data(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
-        if hasattr(cfg, 'debug') and cfg.debug:
+        noise_scale = np.random.uniform(low=0, high=2, size=(batch_size))
+        noise_scale = torch.from_numpy(noise_scale).to(ct).view(-1, 1)
+        noise = torch.randn(ct.shape, device=ct.device) * noise_scale.view(-1, 1, 1)
+        ct = ct + ct * noise
+        ct[ct < 0] = 0
+        params['noise_scale'] = noise_scale
+
+        output = model(ct.transpose(dim0=1, dim1=2))
+        output_params = torch.cat(list(output.values()), dim=-1)
+
+        if cfg.aif == 'mixed':
+            aif_recon = interp_aif(parker_aif, weinmann_aif, beta=output['beta'])
+            ct_recon = evaluate_curve(output['ktrans'], output['kep'], output['t0'], aif_t=aif_t, aif_cp=aif_recon, t=acquisition_time)
+        else:
+            ct_recon = evaluate_curve(output['ktrans'], output['kep'], output['t0'], aif_t=aif_t, aif_cp=aif_cp, t=acquisition_time)
+
+        if i % 100 == 0 and hasattr(cfg, 'debug') and cfg.debug:
             n = 20
             cols = 10
             rows = int(math.ceil(n // 10))
             fig, axes = plt.subplots(rows, cols, figsize=(cols*2, rows*2))
             indice = np.random.choice(ct.shape[0], n)
-            ct_ = ct.cpu().numpy()
-            ct_noise_ = ct_noise.cpu().numpy()
+            ct_ = ct.cpu()
+            ct_recon_ = ct_recon.cpu().detach()
 
-            for ind, i in enumerate(indice):
+            for ind, j in enumerate(indice):
                 r, c = ind // cols, ind % cols
-                axes[r, c].plot(ct_[i, :].flatten(), 'blue')
-                axes[r, c].plot(ct_noise_[i, :].flatten(), 'red')
+                axes[r, c].plot(ct_[j, :].flatten())
+                axes[r, c].plot(ct_recon_[j, :].flatten())
                 axes[r, c].grid()
-                axes[r, c].set_title('%.2f|%.2f|%.2f' % (ktrans[i].item(), kep[i].item(), t0[i].item()))
+                axes[r, c].set_title(
+                    'noise: %.2f (%.2f)\n%.2f | %.2f | %.2f' % (output['noise_scale'][j].item(), noise_scale[j].item(), ktrans[j].item(), kep[j].item(), t0[j].item()),
+                    fontsize=12)
+
             plt.tight_layout()
             fn = osp.join(cfg.work_dir, 'debug', 'curves-iter%d.jpg' % i)
             os.makedirs(osp.dirname(fn), exist_ok=True)
             plt.savefig(fn)
-
-        output = model(ct_noise)
-
-        if hasattr(cfg, 'denoise') and cfg.denoise:
-            target = ct
-        else:
-            assert len(output) == 3
-            output = torch.cat(output, dim=1)
-            target = params
+            plt.close()
 
         if cfg.loss == 'mse':
-            loss = torch.nn.functional.mse_loss(output, target)
+            loss_func = torch.nn.functional.mse_loss
         elif cfg.loss == 'l1':
-            loss = torch.nn.functional.l1_loss(output, target)
+            loss_func = torch.nn.functional.l1_loss
         elif cfg.loss == 'mixed':
-            loss = (torch.nn.functional.l1_loss(output, target) + torch.nn.functional.mse_loss(output, target)) / 2
+            loss_func = mix_l1_mse_loss
         else:
             raise TypeError(cfg.loss)
+        
+        loss_param = OrderedDict()
+        for k, v in output.items():
+            loss_param[k] = loss_func(output[k], params[k])
+        loss_ct = ct_loss(ct_recon, ct, loss_func=loss_func)
+        loss = torch.stack(list(loss_param.values())).sum() + loss_ct
 
         optimizer.zero_grad()
         loss.backward()
@@ -235,16 +242,22 @@ if __name__ == '__main__':
             pg['lr'] = lr
         optimizer.step()
 
-        if i % args.log_freq == 0 or i == args.max_iters - 1 or i == 0:
-            logger.info(
-                "iter {iter} loss={loss}  lr={lr} Ktrans (min={ktrans_min:.2f}, max={ktrans_max:.2f}, mean={ktrans_mean:.2f}), Kep (min={kep_min:.2f}, max={kep_max:.2f}, mean={kep_mean:.2f}), t0 (min={t0_min:.2f}, max={t0_max:.2f}, mean={t0_mean:.2f}) ".format(
-                    iter='%.6d' % i, loss='%.1e' % loss.item(), lr='%.3e' % lr,
-                    ktrans_min=ktrans.min().item(), ktrans_max=ktrans.max().item(), ktrans_mean=ktrans.mean().item(),
-                    kep_min=kep.min().item(), kep_max=kep.max().item(), kep_mean=kep.mean().item(),
-                    t0_min=t0.min().item(), t0_max=t0.max().item(), t0_mean=t0.mean().item(),
-                ))
-            writer.add_scalar('lr', lr, i)
-            writer.add_scalar('loss', loss.mean().item(), i)
+        if (i+1) % args.log_freq == 0 or (i +1)== args.max_iters or i == 0:
+            log_str = f"[{i+1}|{args.max_iters}] loss={loss.item():.3f} l_ct={loss_ct.item():.3f} l_p={torch.stack(list(loss_param.values())).sum():.3f} ("
+            for j1, (k, v) in enumerate(loss_param.items()):
+                if j1 < len(loss_param) - 1:
+                    log_str += f"{k}={v.item():.3f}, "
+                else:
+                    log_str += f"{k}={v.item():.3f}"
+            log_str += f") lr={lr:.2e}, Ktrans({ktrans.min():.2f}, {ktrans.max():.2f}, {ktrans.mean():.2f}), Kep({kep.min():.2f}, {kep.max():.2f}, {kep.mean():.2f}), t0({t0.min():.2f}, {t0.max():.2f}, {t0.mean():.2f})"
+            logger.info(log_str)
+
+            writer.add_scalar('train/lr', lr, i)
+            writer.add_scalar('train/loss', loss.item(), i)
+            writer.add_scalar('train/loss-param', torch.stack(list(loss_param.values())).sum().item(), i)
+            writer.add_scalar('train/loss-ct', loss_ct.mean().item(), i)
+            for k, v in loss_param.items():
+                writer.add_scalar(f'train/loss-param-{k}', v.item(), i)
 
         if (i + 1) % 1e4 == 0:
             torch.save(

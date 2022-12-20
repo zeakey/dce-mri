@@ -1,8 +1,9 @@
-from turtle import forward
 import torch
 import torch.nn as nn
 from mmcls.models.backbones.vision_transformer import TransformerEncoderLayer
 from mmcv.cnn import MODELS
+
+from collections import OrderedDict
 
 
 @MODELS.register_module()
@@ -15,12 +16,14 @@ class DCETransformer(nn.Module):
         embed_dims=32,
         num_heads=2,
         num_outputs=3,
+        output_keys=['ktrans', 'kep', 't0'],
         feedforward_channels=32,
         drop_rate=0
         ) -> None:
 
         super().__init__()
         self.num_outputs = num_outputs
+        self.output_keys = output_keys
         self.use_grad = use_grad
 
         if self.use_grad:
@@ -41,10 +44,10 @@ class DCETransformer(nn.Module):
         self.layers = nn.ModuleList()
 
         # use ReLU to prevent negative outputs
-        self.output = nn.ModuleList()
+        self.output_layer = nn.ModuleList()
 
         for _ in range(self.num_outputs):
-            self.output.append(nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU()))
+            self.output_layer.append(nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU()))
 
         for _ in range(num_layers):
             self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
@@ -52,7 +55,7 @@ class DCETransformer(nn.Module):
         self.init_weights()
 
     def init_weights(self):
-        for m in self.output:
+        for m in self.output_layer:
             nn.init.normal_(m[0].weight, std=0.01)
 
     def forward(self, x, t=None):
@@ -74,12 +77,11 @@ class DCETransformer(nn.Module):
         for layer in self.layers:
             x = layer(x)
         x = x[:, -1, :]
-        # x = x.mean(dim=1)
         
-        output = []
-        for m in self.output:
-            output.append(m(x))
+        output = OrderedDict()
 
+        for k, layer in zip(self.output_keys, self.output_layer):
+            output[k] = layer(x)
         return output
 
 

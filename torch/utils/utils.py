@@ -85,11 +85,29 @@ def write_dicom(array, filename, ds, **kwargs):
     ds.save_as(filename, write_like_original=False)
 
 
+def save2dicom(array, save_dir, example_dicom, description, **kwargs):
+    SeriesNumber = int(str(str2int(description))[-12:])
+    SeriesInstanceUID = str(SeriesNumber)
+    save_dir = osp.join(save_dir, description)
+    save_slices_to_dicom(
+        array,
+        dicom_dir=save_dir,
+        example_dicom=example_dicom,
+        SeriesNumber=SeriesNumber,
+        SeriesInstanceUID=SeriesInstanceUID,
+        SeriesDescription=description,
+        **kwargs)
+
+
 def ct_loss(pred, target, reg_neg=10, loss_func=torch.nn.functional.l1_loss):
     assert reg_neg >= 0
     loss = loss_func(pred, target)
     reg = -reg_neg * ((pred < 0) * pred).mean()
     return loss + reg
+
+
+def mix_l1_mse_loss(x, y):
+    return torch.nn.functional.l1_loss(x, y) / 2 + torch.nn.functional.mse_loss(x, y) / 2
 
 
 def spatial_loss(data, uncertainty, r=3, alpha=-0.1):
