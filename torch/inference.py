@@ -197,6 +197,9 @@ def process_patient(cfg, dce_dir, optimize_beta=False):
         t2w=t2w,
         cad_ktrans=cad_ktrans)
     if optimize_beta:
+        results['aif_cp'] = aif_cp.detach().cpu()
+        results['parker_aif'] = parker_aif.detach().cpu()
+        results['weinmann_aif'] = weinmann_aif.detach().cpu()
         results['beta_iter'] = beta_iter.detach().cpu()
     torch.cuda.empty_cache()
     return results
@@ -233,7 +236,11 @@ if __name__ == '__main__':
             ct_iter = results['ct_iter']
             ct_iter_beta = results_beta['ct_iter']
             beta = results_beta['beta_iter']
+            parker_aif = results_beta['parker_aif']
+            weinmann_aif = results_beta['weinmann_aif']
+            aif = results_beta['aif_cp']
             results_beta['beta_iter'] -= results_beta['beta_iter'].min()
+
             save2dicom(results['ktrans_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='Ktrans')
             save2dicom(results_beta['ktrans_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='Ktrans-beta')
             save2dicom(results_beta['beta_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='beta')
@@ -246,7 +253,7 @@ if __name__ == '__main__':
             mask[y_t:y_b, x_l:x_r] = 1
             mask = mask.nonzero()
             selected = mask[torch.randperm(mask.size(0))[:n]]
-            ncol = 6
+            ncol = 7
             fig, axes = plt.subplots(n, ncol, figsize=(ncol*4, n*4))
             vlplt.clear_ticks(axes)
 
@@ -266,11 +273,16 @@ if __name__ == '__main__':
                 axes[i, 0].plot(ct_iter_beta[y, x, z, :], color='pink')
                 axes[i, 0].legend(['data', 'init', 'iter', f'iter ($\\beta$={beta[y, x, z]:.2f})'])
 
+                axes[i, 1].plot(parker_aif, color='r')
+                axes[i, 1].plot(weinmann_aif, color='g')
+                axes[i, 1].plot(aif[y, x, z, :], color='black')
+                axes[i, 1].legend(['Parker', 'Weinmann', 'Interp'])
+
                 for j, (k, v) in enumerate(kv.items()):
-                    axes[i, j+1].imshow(norm01(v[:, :, z]))
+                    axes[i, j+2].imshow(norm01(v[:, :, z]))
                     roi = matplotlib.patches.Rectangle((x_l, y_t), width=x_r-x_l, height=y_b-y_t, edgecolor='r', facecolor='none')
-                    axes[i, j+1].scatter(x, y, marker='x', color='red')
-                    axes[i, j+1].add_patch(roi)
-                    axes[i, j+1].set_title(k, fontsize=24)
+                    axes[i, j+2].scatter(x, y, marker='x', color='red')
+                    axes[i, j+2].add_patch(roi)
+                    axes[i, j+2].set_title(k, fontsize=24)
             plt.tight_layout()
             plt.savefig(f'{save_dir}/{patient_id}/ct.pdf')
