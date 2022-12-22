@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument('config', help='train config file path')
     parser.add_argument('checkpoint', help='checkpoint weights')
     parser.add_argument('--max-iter', type=int, default=50)
+    parser.add_argument('--clip-beta', action='store_true')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -181,6 +182,8 @@ def process_patient(cfg, dce_dir, optimize_beta=False):
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
+        if cfg.clip_beta:
+            beta_iter.data.clamp_(0, 1)
         logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.4f}")
 
     results = dict(
@@ -210,6 +213,7 @@ if __name__ == '__main__':
     cfg = Config.fromfile(args.config)
     cfg['checkpoint'] = args.checkpoint
     cfg['max_iter'] = args.max_iter
+    cfg['clip_beta'] = args.clip_beta
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
@@ -228,6 +232,11 @@ if __name__ == '__main__':
         results_beta = process_patient(cfg, dce_dir, optimize_beta=True)
         if results is not None:
             patient_id = results['patient_id']
+            save_dir1 = f'{save_dir}/{patient_id}'
+            if osp.isdir(save_dir1):
+                logger.info(f'{save_dir1} exists, pass.')
+                continue
+
             t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
             t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
             t2w = rearrange(t2w, '1 c h w -> h w c').numpy()
@@ -241,9 +250,9 @@ if __name__ == '__main__':
             aif = results_beta['aif_cp']
             results_beta['beta_iter'] -= results_beta['beta_iter'].min()
 
-            save2dicom(results['ktrans_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='Ktrans')
-            save2dicom(results_beta['ktrans_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='Ktrans-beta')
-            save2dicom(results_beta['beta_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='beta')
+            save2dicom(results['ktrans_iter'], save_dir=save_dir1, example_dicom=results['t2w'], description='Ktrans')
+            save2dicom(results_beta['ktrans_iter'], save_dir=save_dir1, example_dicom=results['t2w'], description='Ktrans-beta')
+            save2dicom(results_beta['beta_iter'], save_dir=save_dir1, example_dicom=results['t2w'], description='beta')
 
             h, w = results['ktrans_iter'].shape[:2]
             n = 100
