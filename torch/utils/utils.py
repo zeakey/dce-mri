@@ -6,6 +6,7 @@ from pydicom.dataset import Dataset
 from vlkit.image import norm01
 from einops import rearrange
 from tqdm import tqdm
+from collections import OrderedDict
 from tofts import tofts
 
 from aif import parker_aif, biexp_aif
@@ -32,7 +33,7 @@ def read_dicom_data(path):
     return data
 
 
-def save_slices_to_dicom(data, dicom_dir, example_dicom=None, **kwargs):
+def save_slices_to_dicom(data, save_dir, example_dicom=None, **kwargs):
     """
     data: [h w slices]
     """
@@ -46,24 +47,22 @@ def save_slices_to_dicom(data, dicom_dir, example_dicom=None, **kwargs):
     data = data.astype(np.float64)
     data_uint16 = (data * 1000).astype(np.uint16)
     slices = data_uint16.shape[2]
-    if example_dicom is None:
-        example_dicoms = '/data1/IDX_Current/dicom/10042_1_004D6Sy8/20160616/iCAD-MCC-Ktrans-FA-0-E_33009/'
 
-    if osp.isdir(example_dicom):
-        example_dicoms = sorted([osp.join(example_dicom, i) for i in os.listdir(example_dicom) if i.endswith('dcm')])
+    if isinstance(example_dicom, str) and osp.isdir(example_dicom):
+        example_dicom = sorted([osp.join(example_dicom, i) for i in os.listdir(example_dicom) if i.endswith('dcm')])
+        example_dicom = [pydicom.dcmread(d) for d in example_dicom]
+    elif isinstance(example_dicom, list):
+        pass
     else:
         raise ValueError
 
     for i in range(slices):
-        dicom = example_dicoms[i]
-        dicom = pydicom.dcmread(dicom)
-        save_fn = osp.join(dicom_dir, 'slice-%.3d.dcm' % (i+1))
+        save_fn = osp.join(save_dir, 'slice-%.3d.dcm' % (i+1))
         img = np.squeeze(data_uint16[:, :, i])
-        thickness = 3.6
         write_dicom(
             img,
             save_fn,
-            ds=dicom,
+            ds=example_dicom[i],
             **kwargs
         )
 
@@ -134,22 +133,26 @@ def inference(model, data, convert2cpu=False):
         data = data.unsqueeze(dim=-1)
     model.eval()
 
+    output = OrderedDict()
+    for k in model.output_keys:
+        output[k] = []
+
     h, w, s, f, d = data.shape
     data = rearrange(data, 'h w s f d -> h (w s) f d')
-    output = []
 
     print('Start inference...')
     tic = time.time()
     with torch.no_grad():
         for i, data1 in enumerate(tqdm(data)):
-            out = model(data1)
-            output.append(torch.cat(out, dim=-1))
+            o = model(data1)
+            for k in model.output_keys:
+                output[k].append(o[k])
     toc = time.time()
-    output = torch.cat(output, dim=0).view(h, w, s, -1)
+    for k in model.output_keys:
+        output[k] = torch.cat(output[k], dim=0)
+    for k in model.output_keys:
+        output[k] = output[k].view(h, w, s)
     print('Done, %.3fs elapsed.' % (toc-tic))
-
-    if convert2cpu:
-        output = output.cpu()
     return output
 
 
