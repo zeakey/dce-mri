@@ -41,7 +41,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
     parser.add_argument('config', help='train config file path')
     parser.add_argument('checkpoint', help='checkpoint weights')
-    parser.add_argument('--max-iter', type=int, default=100)
+    parser.add_argument('--max-iter', type=int, default=80)
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -83,7 +83,7 @@ def save2dicom(array, save_dir, example_dicom, description, **kwargs):
         **kwargs)
 
 
-def process_patient(cfg, dce_dir, save_dir='results/dispersion'):
+def process_patient(cfg, dce_dir, optimize_beta=False):
     patient_id = dce_dir.split(os.sep)[-3]
     cad_ktrans_dir = find_image_dirs.find_ktrans_folder(osp.join(dce_dir, '../'))
     t2_dir = find_image_dirs.find_t2_folder(osp.join(dce_dir, '../'))
@@ -131,7 +131,7 @@ def process_patient(cfg, dce_dir, save_dir='results/dispersion'):
     toc = time.time()
     logger.info('%.2f seconds' % (toc-tic))
 
-    curve_init = evaluate_curve(ktrans_init, kep_init, t0_init, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp).cpu()
+    ct_init = evaluate_curve(ktrans_init, kep_init, t0_init, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp).cpu()
     loss_init = calculate_reconstruction_loss(
         ktrans_init,
         kep_init,
@@ -150,48 +150,56 @@ def process_patient(cfg, dce_dir, save_dir='results/dispersion'):
     # -------------------------------------------------------------------------------------------- #
     ktrans_iter = ktrans_init.clone().to(device=cfg.device, dtype=dtype).requires_grad_()
     kep_iter = kep_init.clone().to(ktrans_iter).requires_grad_()
-    beta_iter = torch.ones_like(kep_iter).requires_grad_()
-    # if cfg.aif == 'mixed':
-    #     beta_iter = beta_init.clone().to(ktrans_iter).requires_grad_()
+
+    if optimize_beta:
+        beta_iter = torch.ones_like(kep_iter).requires_grad_()
+        optimizer = torch.optim.RMSprop(params=[{'params': [ktrans_iter, kep_iter], 'lr': 1e-1}, {'params': [beta_iter], 'lr': 1e-3}])
+        optimizer.param_groups[0]['lr_factor'] = 1
+        optimizer.param_groups[1]['lr_factor'] = 1e2
+    else:
+        optimizer = torch.optim.RMSprop(params=[ktrans_iter, kep_iter], lr=1e-3)
+        optimizer.param_groups[0]['lr_factor'] = 1
 
     aif_t = aif_t.to(ktrans_iter)
     ct = ct.to(ktrans_iter)
-    # optimizer = torch.optim.AdamW(params=[{'params': [ktrans_iter, kep_iter], 'lr': 1e-1}, {'params': [beta_iter], 'lr': 1e-3}])
-    optimizer = torch.optim.RMSprop(params=[{'params': [ktrans_iter, kep_iter], 'lr': 1e-1}, {'params': [beta_iter], 'lr': 1e-3}])
+    
     scheduler = CosineScheduler(epoch_iters=cfg.max_iter, epochs=1, warmup_iters=cfg.max_iter//10, max_lr=1e-3, min_lr=1e-6)
 
     for i in range(cfg.max_iter):
-        aif_cp = interp_aif(parker_aif, weinmann_aif, beta_iter)
+        if optimize_beta:
+            aif_cp = interp_aif(parker_aif, weinmann_aif, beta_iter)
+        else:
+            aif_cp = parker_aif
         ct_iter = evaluate_curve(ktrans_iter, kep_iter, t0_init, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
         loss_iter = torch.nn.functional.l1_loss(ct_iter, ct, reduction='none').sum(dim=-1)
         loss = loss_iter.mean()
 
         lr = scheduler.step()
-        optimizer.param_groups[0]['lr'] = lr
-        optimizer.param_groups[1]['lr'] = lr * 1e2
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr * pg['lr_factor']
 
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        # beta_iter.data.clamp_(0, 1)
         logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.4f}")
-    ct_iter = ct_iter.detach().cpu()
-    ktrans_iter = ktrans_iter.detach().cpu()
-    kep_iter = kep_iter.detach().cpu()
-    loss_iter = loss_iter.detach().cpu()
-    beta_iter = beta_iter.detach().cpu()
-    return dict(
+
+    results = dict(
         patient_id=patient_id,
-        ktrans_init=ktrans_init,
-        kep_init=kep_init,
-        t0_init=t0_init,
-        ct_iter=ct_iter,
-        ktrans_iter=ktrans_iter,
-        kep_iter=kep_iter,
-        loss_iter=loss_iter,
-        beta_iter=beta_iter,
+        ktrans_init=ktrans_init.detach().cpu(),
+        kep_init=kep_init.detach().cpu(),
+        t0_init=t0_init.detach().cpu(),
+        ct=ct.detach().cpu(),
+        ct_init=ct_init.detach().cpu(),
+        ct_iter=ct_iter.detach().cpu(),
+        ktrans_iter=ktrans_iter.detach().cpu(),
+        kep_iter=kep_iter.detach().cpu(),
+        loss_iter=loss_iter.detach().cpu(),
         t2w=t2w,
         cad_ktrans=cad_ktrans)
+    if optimize_beta:
+        results['beta_iter'] = beta_iter.detach().cpu()
+    torch.cuda.empty_cache()
+    return results
 
 
 if __name__ == '__main__':
@@ -211,13 +219,63 @@ if __name__ == '__main__':
     mmcv.runner.utils.set_random_seed(0)
     cfg['device'] = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
+    save_dir = f'{cfg.work_dir}/results-1221-2022/'
     for dce_dir in find_image_dirs.find_dce_folders('data/test-data'):
         # data = loadmat('../tmp/parker_aif/10042_1_003Tnq2B-20180212.mat')
-        results = process_patient(cfg, dce_dir, save_dir='results/dispersion-1')
+        results = process_patient(cfg, dce_dir)
+        results_beta = process_patient(cfg, dce_dir, optimize_beta=True)
         if results is not None:
             patient_id = results['patient_id']
-            save2dicom(results['ktrans_iter'], save_dir=f'{cfg.work_dir}/results-1221-2022/{patient_id}', example_dicom=results['t2w'], description='Ktrans-beta')
-            save2dicom(results['beta_iter'], save_dir=f'{cfg.work_dir}/results-1221-2022/{patient_id}', example_dicom=results['t2w'], description='beta')
+            t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
+            t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
+            t2w = rearrange(t2w, '1 c h w -> h w c').numpy()
+            ct = results['ct']
+            ct_init = results['ct_init']
+            ct_iter = results['ct_iter']
+            ct_iter_beta = results_beta['ct_iter']
+            beta = results_beta['beta_iter']
+            results_beta['beta_iter'] -= results_beta['beta_iter'].min()
+            save2dicom(results['ktrans_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='Ktrans')
+            save2dicom(results_beta['ktrans_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='Ktrans-beta')
+            save2dicom(results_beta['beta_iter'], save_dir=f'{save_dir}/{patient_id}', example_dicom=results['t2w'], description='beta')
+
+            h, w = results['ktrans_iter'].shape[:2]
+            n = 100
+            mask = torch.zeros(h, w)
+            y_t, y_b = 70, 120
+            x_l, x_r = 60, 100
+            mask[y_t:y_b, x_l:x_r] = 1
+            mask = mask.nonzero()
+            selected = mask[torch.randperm(mask.size(0))[:n]]
+            ncol = 5
+            fig, axes = plt.subplots(n, ncol, figsize=(ncol*4, n*4))
+            vlplt.clear_ticks(axes)
+            for i in range(n):
+                y, x = selected[i]
+                z = np.random.choice(range(6, 15))
+                axes[i, 0].plot(ct[y, x, z, :], color='black')
+                axes[i, 0].plot(ct_init[y, x, z, :], color='blue')
+                axes[i, 0].plot(ct_iter[y, x, z, :], color='green')
+                axes[i, 0].plot(ct_iter_beta[y, x, z, :], color='pink')
+                axes[i, 0].legend(['data', 'init', 'iter', f'iter (beta={beta[y, x, z]:.2f})'])
+
+                axes[i, 1].imshow(norm01(t2w[:, :, z]))
+                axes[i, 2].imshow(norm01(results['ktrans_init'][:, :, z].numpy()))
+                axes[i, 3].imshow(norm01(results['ktrans_iter'][:, :, z].numpy()))
+                axes[i, 4].imshow(norm01(results_beta['ktrans_iter'][:, :, z].numpy()))
+                if i == 0:
+                    axes[i, 1].set_title('T2W')
+                    axes[i, 2].set_title('Ktrans (init)')
+                    axes[i, 3].set_title('Ktrans (iter)')
+                    axes[i, 4].set_title('Ktrans (iter+beta)')
+
+                for j in range(2,4):
+                    roi = matplotlib.patches.Rectangle((x_l, y_t), width=x_r-x_l, height=y_b-y_t, edgecolor='r', facecolor='none')
+                    axes[i, j].scatter(x, y, marker='x', color='red')
+                    axes[i, j].add_patch(roi)
+
+            plt.tight_layout()
+            plt.savefig(f'{save_dir}/{patient_id}/ct.pdf')
 
     sys.exit()
 
