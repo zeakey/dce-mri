@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import vlkit.plt as vlplt
 
-from scipy.stats import beta
+from collections import OrderedDict
 
 import torch
 from torch.distributions import Beta
@@ -247,9 +247,17 @@ if __name__ == '__main__':
             mask[y_t:y_b, x_l:x_r] = 1
             mask = mask.nonzero()
             selected = mask[torch.randperm(mask.size(0))[:n]]
-            ncol = 5
-            fig, axes = plt.subplots(n, ncol, figsize=(ncol*4, n*4))
+            ncol = 6
+            fig, axes = plt.subplots(n, ncol, figsize=(ncol*2, n*2))
             vlplt.clear_ticks(axes)
+
+            kv = OrderedDict(
+                t2w=t2w,
+                ktrans_init=results['ktrans_init'].numpy(),
+                ktrans_iter=results['ktrans_iter'].numpy(),
+                ktrans_iter_beta=results_beta['ktrans_iter'].numpy(),
+                beta =results_beta['beta_iter'].numpy())
+
             for i in range(n):
                 y, x = selected[i]
                 z = np.random.choice(range(6, 15))
@@ -259,157 +267,11 @@ if __name__ == '__main__':
                 axes[i, 0].plot(ct_iter_beta[y, x, z, :], color='pink')
                 axes[i, 0].legend(['data', 'init', 'iter', f'iter (beta={beta[y, x, z]:.2f})'])
 
-                axes[i, 1].imshow(norm01(t2w[:, :, z]))
-                axes[i, 2].imshow(norm01(results['ktrans_init'][:, :, z].numpy()))
-                axes[i, 3].imshow(norm01(results['ktrans_iter'][:, :, z].numpy()))
-                axes[i, 4].imshow(norm01(results_beta['ktrans_iter'][:, :, z].numpy()))
-                if i == 0:
-                    axes[i, 1].set_title('T2W')
-                    axes[i, 2].set_title('Ktrans (init)')
-                    axes[i, 3].set_title('Ktrans (iter)')
-                    axes[i, 4].set_title('Ktrans (iter+beta)')
-
-                for j in range(2,4):
+                for j, (k, v) in enumerate(kv.items()):
+                    axes[i, j+1].imshow(norm01(v[:, :, z]))
                     roi = matplotlib.patches.Rectangle((x_l, y_t), width=x_r-x_l, height=y_b-y_t, edgecolor='r', facecolor='none')
-                    axes[i, j].scatter(x, y, marker='x', color='red')
-                    axes[i, j].add_patch(roi)
-
+                    axes[i, j+1].scatter(x, y, marker='x', color='red')
+                    axes[i, j+1].add_patch(roi)
+                    axes[i, j+1].set_title(k)
             plt.tight_layout()
             plt.savefig(f'{save_dir}/{patient_id}/ct.pdf')
-
-    sys.exit()
-
-    positions = torch.tensor([
-        [80, 80],
-        [69, 110],
-        [68, 108],
-        [68, 109],
-        [68, 110],
-        [69, 108],
-        [69, 109],
-        [69, 110],
-        #
-        [104, 90],
-        [104, 88],
-        [104, 89],
-        [104, 91],
-        #
-        [42+x_tl, 48+y_tl],
-    ])
-
-    mask = torch.zeros(160, 160)
-    mask[y_tl:y_br, x_tl:x_br] = True
-    y, x = torch.where(mask)
-
-    n = 150
-    inds = np.random.choice(x.numel(), min(n, x.numel()))
-    x = x[inds].view(-1, 1)
-    y = y[inds].view(-1, 1)
-    positions = torch.cat((positions, torch.cat((y, x), dim=1)), dim=0) 
-
-    z = torch.zeros(positions.shape[0], dtype=torch.int).fill_(5)
-    x, y = positions.split(dim=1, split_size=1)
-    x = x.flatten()
-    y = y.flatten()
-
-
-    ncol = 16
-    n = positions.shape[0]
-    fig, axes = plt.subplots(n, ncol, figsize=(3*ncol, 3*n))
-
-    for idx, i in enumerate(range(x.numel())):
-        y1, x1, z1 = y[i].item(), x[i].item(), z[i].item()
-        ct1 = ct[y1, x1, z1]
-
-        params_init = torch.tensor([ktrans_init[y1, x1, z1].item(), kep_init[y1, x1, z1].item(), t0_init[y1, x1, z1].item()])
-        params_iter = torch.tensor([ktrans_iter[y1, x1, z1].item(), kep_iter[y1, x1, z1].item(), t0_init[y1, x1, z1].item()])
-        params_dsps = torch.tensor([ktrans_dsps[y1, x1, z1].item(), kep_dsps[y1, x1, z1].item(), t0_init[y1, x1, z1].item()])
-        params_interp_aif = torch.tensor([ktrans_interp_aif[y1, x1, z1].item(), kep_interp_aif[y1, x1, z1].item(), t0_init[y1, x1, z1].item()])
-
-        j = 0
-        axes[idx, j].plot(ct1)
-        axes[idx, j].plot(curve_init[y1, x1, z1])
-        axes[idx, j].set_title('Transfomer param:\n %.3f %.3f %.3f \n loss=%.3f'  % (params_init[0], params_init[1], params_init[2], loss_init[y1, x1, z1]))
-
-        j += 1
-        axes[idx, j].plot(ct1)
-        axes[idx, j].plot(ct_iter[y1, x1, z1])
-        axes[idx, j].set_title('Iter param:\n %.3f %.3f %.3f \n loss=%.3f'  % (params_iter[0], params_iter[1], params_iter[2], loss_iter[y1, x1, z1]))
-
-        j += 1
-        axes[idx, j].plot(ct1)
-        axes[idx, j].plot(ct_dsps[y1, x1, z1])
-        axes[idx, j].set_title('Iter param (disperse):\n %.3f %.3f %.3f \n loss=%.3f'  % (params_dsps[0], params_dsps[1], params_dsps[2], loss_dsps[y1, x1, z1]))
-
-        j += 1
-        axes[idx, j].plot(ct1)
-        axes[idx, j].plot(ct_interp_aif[y1, x1, z1])
-        axes[idx, j].set_title('Iter param (interp_aif):\n %.3f %.3f %.3f \n loss=%.3f'  % (params_interp_aif[0], params_interp_aif[1], params_interp_aif[2], loss_interp_aif[y1, x1, z1]))
-
-        j += 1
-        axes[idx, j].plot(aif_dsps[y1, x1, z1])
-        axes[idx, j].set_title('AIF (dispersed): $\\beta$=%.3f'  % beta_dsps[y1, x1, z1])
-        axes[idx, j].set_ylim(0, 10.5)
-        axes[idx, j].grid(True)
-
-        j += 1
-        axes[idx, j].plot(aif_interp_aif[y1, x1, z1])
-        axes[idx, j].set_title('AIF (interp): $\\beta$=%.3f'  % beta_interp_aif[y1, x1, z1])
-        axes[idx, j].set_ylim(0, 10.5)
-        axes[idx, j].grid(True)
-
-        j = j + 1
-        t2im = mmcv.imresize(norm01(t2[z1]), (h, w))
-        axes[idx, j].imshow(t2im)
-        rect = patches.Rectangle((x_tl, y_tl), x_br-x_tl, y_br-y_tl, linewidth=1, edgecolor='black', facecolor='none')
-        axes[idx, j].add_patch(rect)
-        axes[idx, j].set_title('T2 (full) \n (%d, %d, %d)' % (x1, y1, z1))
-        axes[idx, j].scatter(x1, y1, marker='x', color='red')
-
-        j = j + 1
-        axes[idx, j].imshow(t2im[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].set_title('T2 (ROI) \n (%d, %d, %d)' % (x1, y1, z1))
-
-        j = j + 1
-        axes[idx, j].imshow(norm01(ktrans_init[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
-        axes[idx, j].set_title('Ktrans init')
-
-        j = j + 1
-        axes[idx, j].imshow(norm01(ktrans_iter[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
-        axes[idx, j].set_title('Ktrans iter')
-
-        j = j + 1
-        axes[idx, j].imshow(norm01(beta_dsps[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
-        axes[idx, j].set_title('$\\beta$ (dsps)')
-
-        j = j + 1
-        axes[idx, j].imshow(norm01(beta_interp_aif[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
-        axes[idx, j].set_title('$\\beta$ (interp)')
-
-        j = j + 1
-        axes[idx, j].imshow(norm01(loss_init[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
-        axes[idx, j].set_title('loss_init %.3f' % loss_init[y1, x1, z1])
-
-        j = j + 1
-        axes[idx, j].imshow(norm01(loss_iter[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
-        axes[idx, j].set_title('loss_iter %.3f' % loss_iter[y1, x1, z1])
-
-        j = j + 1
-        axes[idx, j].imshow(norm01(loss_dsps[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
-        axes[idx, j].set_title('loss_dsps %.3f' % loss_dsps[y1, x1, z1])
-
-        j = j + 1
-        axes[idx, j].imshow(norm01(loss_interp_aif[:, :, z1].numpy())[y_tl:y_br, x_tl:x_br])
-        axes[idx, j].scatter(x1-x_tl, y1-y_tl, marker='x', color='red')
-        axes[idx, j].set_title('loss_interp_aif %.3f' % loss_interp_aif[y1, x1, z1])
-
-    plt.tight_layout(h_pad=3)
-    plt.savefig('relative-loss-10042_1_003Tnq2B.pdf')
-    plt.close()
