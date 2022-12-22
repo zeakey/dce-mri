@@ -182,7 +182,7 @@ def process_patient(cfg, dce_dir, optimize_beta=False):
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        if cfg.clip_beta:
+        if optimize_beta and cfg.clip_beta:
             beta_iter.data.clamp_(0, 1)
         logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.4f}")
 
@@ -281,6 +281,7 @@ if __name__ == '__main__':
                 axes[i, 0].plot(ct_iter[y, x, z, :], color='green')
                 axes[i, 0].plot(ct_iter_beta[y, x, z, :], color='pink')
                 axes[i, 0].legend(['data', 'init', 'iter', f'iter ($\\beta$={beta[y, x, z]:.2f})'])
+                axes[i, 0].set_title(f'{x},{y},{z}')
 
                 axes[i, 1].plot(parker_aif, color='r')
                 axes[i, 1].plot(weinmann_aif, color='g')
