@@ -109,15 +109,16 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
     assert type(ktrans) == type(kep) == type(t0)
     assert ktrans.numel() == kep.numel() == t0.numel()
 
-    if ktrans.numel() == 1:
-        ktrans = ktrans.view(1, 1)
-        kep = kep.view(1, 1)
-        t0 = t0.view(1, 1)
-
     if isinstance(ktrans, float):
         ktrans = torch.tensor(ktrans).to(aif_t)
         kep = torch.tensor(kep).to(aif_t)
         t0 = torch.tensor(t0).to(aif_t)
+
+    if ktrans.numel() == 1:
+        ktrans = ktrans.view(1, 1)
+        kep = kep.view(1, 1)
+        t0 = t0.view(1, 1)
+    assert ktrans.shape == kep.shape == t0.shape
 
     # unify device
     kep = kep.to(ktrans)
@@ -126,7 +127,6 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
     aif_cp = aif_cp.to(ktrans)
     t = t.to(ktrans)
 
-    assert ktrans.shape == kep.shape == t0.shape and ktrans.ndim >= 2 and ktrans.ndim <= 4
 
     orig_shape = list(ktrans.shape)
 
@@ -142,7 +142,6 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
         aif_t = aif_t.repeat(orig_shape + [1])
     else:
         assert list(aif_t.shape)[:-1] == list(ktrans.shape)
-
 
     ktrans = ktrans.reshape(-1, 1)
     kep = kep.reshape(-1, 1)
