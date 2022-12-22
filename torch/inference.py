@@ -41,7 +41,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
     parser.add_argument('config', help='train config file path')
     parser.add_argument('checkpoint', help='checkpoint weights')
-    parser.add_argument('--max-iter', type=int, default=80)
+    parser.add_argument('--max-iter', type=int, default=50)
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -221,7 +221,6 @@ if __name__ == '__main__':
 
     save_dir = f'{cfg.work_dir}/results-1221-2022/'
     for dce_dir in find_image_dirs.find_dce_folders('data/test-data'):
-        # data = loadmat('../tmp/parker_aif/10042_1_003Tnq2B-20180212.mat')
         results = process_patient(cfg, dce_dir)
         results_beta = process_patient(cfg, dce_dir, optimize_beta=True)
         if results is not None:
@@ -248,7 +247,7 @@ if __name__ == '__main__':
             mask = mask.nonzero()
             selected = mask[torch.randperm(mask.size(0))[:n]]
             ncol = 6
-            fig, axes = plt.subplots(n, ncol, figsize=(ncol*2, n*2))
+            fig, axes = plt.subplots(n, ncol, figsize=(ncol*4, n*4))
             vlplt.clear_ticks(axes)
 
             kv = OrderedDict(
@@ -265,13 +264,13 @@ if __name__ == '__main__':
                 axes[i, 0].plot(ct_init[y, x, z, :], color='blue')
                 axes[i, 0].plot(ct_iter[y, x, z, :], color='green')
                 axes[i, 0].plot(ct_iter_beta[y, x, z, :], color='pink')
-                axes[i, 0].legend(['data', 'init', 'iter', f'iter (beta={beta[y, x, z]:.2f})'])
+                axes[i, 0].legend(['data', 'init', 'iter', f'iter ($\\beta$={beta[y, x, z]:.2f})'])
 
                 for j, (k, v) in enumerate(kv.items()):
                     axes[i, j+1].imshow(norm01(v[:, :, z]))
                     roi = matplotlib.patches.Rectangle((x_l, y_t), width=x_r-x_l, height=y_b-y_t, edgecolor='r', facecolor='none')
                     axes[i, j+1].scatter(x, y, marker='x', color='red')
                     axes[i, j+1].add_patch(roi)
-                    axes[i, j+1].set_title(k)
+                    axes[i, j+1].set_title(k, fontsize=24)
             plt.tight_layout()
             plt.savefig(f'{save_dir}/{patient_id}/ct.pdf')
