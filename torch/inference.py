@@ -183,7 +183,7 @@ def process_patient(cfg, dce_dir, optimize_beta=False):
         optimizer.step()
         optimizer.zero_grad()
         if optimize_beta and cfg.clip_beta:
-            beta_iter.data.clamp_(0, 1)
+            beta_iter.data.clamp_(-0.2, 1.2)
         logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.4f}")
 
     results = dict(
@@ -226,17 +226,22 @@ if __name__ == '__main__':
     mmcv.runner.utils.set_random_seed(0)
     cfg['device'] = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    save_dir = f'{cfg.work_dir}/results-1221-2022/'
+    save_dir = f'{cfg.work_dir}/results-0113-2023/'
     for dce_dir in find_image_dirs.find_dce_folders('data/test-data'):
+        patient_id, exp_date = dce_dir.split(os.sep)[-3:-1]
+        histopathology_dir = find_image_dirs.find_histopathology(patient_id, exp_date)
+        iCAD_Ktrans_dir = find_image_dirs.find_icad_ktrans(osp.abspath(osp.join(dce_dir, '../')))
+
+        if histopathology_dir is None or iCAD_Ktrans_dir is None:
+            continue
+
+        save_dir1 = f'{save_dir}/{patient_id}'
+        if osp.isdir(save_dir1):
+            logger.info(f'{save_dir1} exists, pass.')
+            continue
         results = process_patient(cfg, dce_dir)
         results_beta = process_patient(cfg, dce_dir, optimize_beta=True)
         if results is not None:
-            patient_id = results['patient_id']
-            save_dir1 = f'{save_dir}/{patient_id}'
-            if osp.isdir(save_dir1):
-                logger.info(f'{save_dir1} exists, pass.')
-                continue
-
             t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
             t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
             t2w = rearrange(t2w, '1 c h w -> h w c').numpy()
@@ -296,3 +301,10 @@ if __name__ == '__main__':
                     axes[i, j+2].set_title(k, fontsize=24)
             plt.tight_layout()
             plt.savefig(f'{save_dir}/{patient_id}/ct.pdf')
+
+            dst = osp.join(f'{save_dir}/{patient_id}', 'histopathology')
+            shutil.copytree(histopathology_dir, dst)
+            for d in iCAD_Ktrans_dir:
+                dst = osp.join(f'{save_dir}/{patient_id}', d.split(os.sep)[-1])
+                shutil.copytree(d, dst)
+

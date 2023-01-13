@@ -1,5 +1,6 @@
 import os, warnings
 import os.path as osp
+from datetime import datetime
 
 
 def find_dce_folders(path):
@@ -59,6 +60,33 @@ def find_t2_folder(path):
     else:
         warnings.warn('%s: cannot find T2 image.' % path)
         return None
+
+
+def find_icad_ktrans(path):
+    path = osp.abspath(path)
+    assert osp.isdir(path)
+    candidates = [i for i in os.listdir(path) if osp.isdir(osp.join(path, i))]
+    candidates = [osp.join(path, i) for i in candidates if 'icad' in i.lower() and ('ktrans' in i.lower() or 'perm' in i.lower())]
+    return candidates if len(candidates) > 0 else None
+
+
+def find_histopathology(patient_id, exp_date):
+    root = '/media/hdd1/IDX_Current/exported_annotations'
+    subdirs = [s for s in os.listdir(root) if os.listdir(osp.join(root, s))]
+    if patient_id in subdirs:
+        hist_dir = osp.join(root, patient_id)
+    elif patient_id.upper() in subdirs:
+        hist_dir = osp.join(root, patient_id.upper())
+    elif patient_id.lower() in subdirs:
+        hist_dir = osp.join(root, patient_id.lower())
+    else:
+        warnings.warn(f"{patient_id} cannot find histopathology.")
+        return None
+    exp_date = datetime.strptime(exp_date, '%Y%m%d').strftime("%Y-%m-%d")
+    hist_dir = osp.join(hist_dir, exp_date)
+    if not osp.isdir(hist_dir):
+        warnings.warn(f"{hist_dir} not exist.")
+    return hist_dir
 
 
 if __name__ == '__main__':
