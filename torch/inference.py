@@ -226,7 +226,9 @@ if __name__ == '__main__':
     mmcv.runner.utils.set_random_seed(0)
     cfg['device'] = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    save_dir = f'{cfg.work_dir}/results-0113-2023/'
+    timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+    save_dir = f'{cfg.work_dir}/results-{timestamp}/'
+    logger.info(f'Save results to {save_dir}')
     for dce_dir in find_image_dirs.find_dce_folders('data/test-data'):
         patient_id, exp_date = dce_dir.split(os.sep)[-3:-1]
         histopathology_dir = find_image_dirs.find_histopathology(patient_id, exp_date)
@@ -307,4 +309,3 @@ if __name__ == '__main__':
             for d in iCAD_Ktrans_dir:
                 dst = osp.join(f'{save_dir}/{patient_id}', d.split(os.sep)[-1])
                 shutil.copytree(d, dst)
-
