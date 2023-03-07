@@ -102,7 +102,7 @@ if __name__ == '__main__':
     matlab_results = loadmat('../tmp/10042_1_1Wnr0444-20161209.mat')
 
     if cfg.aif != 'mixed':
-        aif_cp, aif_t = get_aif('parker', acquisition_time, max_base, device=device)
+        aif_cp, aif_t = get_aif(cfg.aif, acquisition_time, max_base, device=device)
     else:
         parker_aif, aif_t = get_aif('parker', acquisition_time, max_base, device=device)
         weinmann_aif, _ = get_aif('weinmann', acquisition_time, max_base, device=device)
@@ -210,8 +210,7 @@ if __name__ == '__main__':
                 axes[r, c].plot(ct_recon_[j, :].flatten())
                 axes[r, c].grid()
                 axes[r, c].set_title(
-                    'noise: %.2f (%.2f)\n%.2f | %.2f | %.2f' % (output['noise_scale'][j].item(), noise_scale[j].item(), ktrans[j].item(), kep[j].item(), t0[j].item()),
-                    fontsize=12)
+                    'noise: %.2f\n%.2f | %.2f | %.2f' % (noise_scale[j].item(), ktrans[j].item(), kep[j].item(), t0[j].item()),fontsize=12)
 
             plt.tight_layout()
             fn = osp.join(cfg.work_dir, 'debug', 'curves-iter%d.jpg' % i)
