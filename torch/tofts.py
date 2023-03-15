@@ -2,6 +2,35 @@ import torch
 from einops import rearrange
 
 
+def tofts1d(ktrans, kep, t0, t, aif_t, aif_cp):
+    assert ktrans.ndim == kep.ndim == t0.ndim == 1
+    assert t.ndim == 2 and aif_t.ndim == 2, 't.shape=%s, aif_t.shape=%s' % (str(t.shape), str(aif_t.shape))
+    n = ktrans.numel()
+    t1, t2 = t.shape[1], aif_t.shape[1]
+    dt = aif_t[:, 1] - aif_t[:, 0]
+    impulse = ktrans.unsqueeze(dim=-1) * (-kep.unsqueeze(dim=-1) * aif_t).exp()
+    aif_cp = rearrange(aif_cp, 'n t2 -> 1 n t2')
+    impulse = rearrange(impulse, 'n t2 -> n 1 t2')
+    conv = torch.nn.functional.conv1d(input=aif_cp, weight=impulse.flip(dims=(-1,)), padding=t2-1, groups=n)[:, :, :t2]
+    conv = rearrange(conv, '1 n t2 -> n t2') * dt.view(n, 1)
+    # interpolate
+    conv = rearrange(conv, 'n t2 -> 1 1 n t2')
+    gridx = ((t - t0.view(n, 1)) / dt.view(n, 1))
+    gridx = rearrange(gridx, 'n t1 -> 1 n t1 1')
+    gridy = torch.arange(n).view(1, n, 1, 1).repeat(1, 1, t1, 1).to(gridx)
+    # normalize to [-1, 1]
+    gridx = gridx / (t2 - 1) * 2 -1
+    if n == 1:
+        gridy.fill_(-1)      
+    elif n > 1:
+        gridy = gridy / (n - 1) * 2 -1
+    grid = torch.cat((gridx, gridy), dim=-1) # shape: [1, n, t1, 2]
+    # shape: [1, 1, h*w, t1]
+    interp = torch.nn.functional.grid_sample(conv, grid, align_corners=True)
+    interp = rearrange(interp, '1 1 n t1 -> n t1')
+    return interp
+
+
 def tofts(ktrans, kep, t0, t, aif_t, aif_cp):
     """
     Tofts model
