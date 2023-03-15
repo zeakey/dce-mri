@@ -12,8 +12,6 @@ from mmcv.utils import Config, DictAction, get_logger
 from mmcv.runner import build_optimizer, set_random_seed
 
 from pharmacokinetic import (
-    tofts,
-    find_max_base,
     np2torch,
     calculate_reconstruction_loss,
     compare_results,
@@ -175,27 +173,29 @@ if __name__ == '__main__':
         ktrans, kep, t0 = params["ktrans"], params["kep"], params["t0"]
         params_tensor = torch.cat((ktrans, kep, t0), dim=-1)
         if cfg.aif == 'mixed':
-            aif_cp = interp_aif(parker_aif, weinmann_aif, beta=params['beta'])
+            beta = params['beta'].clamp(0, 1)
+            aif_cp = interp_aif(parker_aif, weinmann_aif, beta=beta)
             params_tensor = torch.cat((params_tensor, params['beta']), dim=-1)
         ct = evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t=acquisition_time)
 
-        noise_scale = np.random.uniform(low=0, high=2, size=(batch_size))
-        noise_scale = torch.from_numpy(noise_scale).to(ct).view(-1, 1)
-        noise = torch.randn(ct.shape, device=ct.device) * noise_scale.view(-1, 1, 1)
+        noise_scale = np.random.uniform(low=0, high=1, size=(batch_size))
+        noise_scale = torch.from_numpy(noise_scale).to(ct)
+        noise = torch.randn(ct.shape, device=ct.device) * noise_scale.view(-1, 1)
         ct = ct + ct * noise
         ct[ct < 0] = 0
         params['noise_scale'] = noise_scale
-
-        output = model(ct.transpose(dim0=1, dim1=2))
+        
+        output = model(ct.unsqueeze(dim=-1))
+        
         output_params = torch.cat(list(output.values()), dim=-1)
 
         if cfg.aif == 'mixed':
             aif_recon = interp_aif(parker_aif, weinmann_aif, beta=output['beta'])
-            ct_recon = evaluate_curve(output['ktrans'], output['kep'], output['t0'], aif_t=aif_t, aif_cp=aif_recon, t=acquisition_time)
+            ct_recon = evaluate_curve(output['ktrans'].squeeze(), output['kep'].squeeze(), output['t0'].squeeze(), aif_t=aif_t, aif_cp=aif_recon, t=acquisition_time)
         else:
-            ct_recon = evaluate_curve(output['ktrans'], output['kep'], output['t0'], aif_t=aif_t, aif_cp=aif_cp, t=acquisition_time)
+            ct_recon = evaluate_curve(output['ktrans'].squeeze(), output['kep'].squeeze(), output['t0'].squeeze(), aif_t=aif_t, aif_cp=aif_cp, t=acquisition_time)
 
-        if i % 100 == 0 and hasattr(cfg, 'debug') and cfg.debug:
+        if i % 200 == 0 and hasattr(cfg, 'debug') and cfg.debug:
             n = 20
             cols = 10
             rows = int(math.ceil(n // 10))
@@ -211,9 +211,8 @@ if __name__ == '__main__':
                 axes[r, c].grid()
                 axes[r, c].set_title(
                     'noise: %.2f\n%.2f | %.2f | %.2f' % (noise_scale[j].item(), ktrans[j].item(), kep[j].item(), t0[j].item()),fontsize=12)
-
             plt.tight_layout()
-            fn = osp.join(cfg.work_dir, 'debug', 'curves-iter%d.jpg' % i)
+            fn = osp.join(cfg.work_dir, 'ct-curves', 'curves-iter%d.jpg' % i)
             os.makedirs(osp.dirname(fn), exist_ok=True)
             plt.savefig(fn)
             plt.close()
@@ -226,10 +225,10 @@ if __name__ == '__main__':
             loss_func = mix_l1_mse_loss
         else:
             raise TypeError(cfg.loss)
-        
+
         loss_param = OrderedDict()
         for k, v in output.items():
-            loss_param[k] = loss_func(output[k], params[k])
+            loss_param[k] = loss_func(output[k].squeeze(dim=-1), params[k])
         loss_ct = ct_loss(ct_recon, ct, loss_func=loss_func)
         loss = torch.stack(list(loss_param.values())).sum() + loss_ct
 

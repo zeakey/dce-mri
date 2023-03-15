@@ -33,11 +33,11 @@ class CTSampler(object):
 
     def sample(self, n):
         results = dict()
-        results["ktrans"] = self.ktrans_sampler.sample((n, 1)).to(self.device) * self.ktrans_scale
-        results["kep"] = self.kep_sampler.sample((n, 1)).to(self.device) * self.kep_scale
-        results["t0"] = self.t0_sampler.sample((n, 1)).to(self.device) * self.t0_scale
+        results["ktrans"] = self.ktrans_sampler.sample((n,)).to(self.device) * self.ktrans_scale
+        results["kep"] = self.kep_sampler.sample((n,)).to(self.device) * self.kep_scale
+        results["t0"] = self.t0_sampler.sample((n,)).to(self.device) * self.t0_scale
         if self.beta_sampler:
-            results["beta"] = self.beta_sampler.sample((n, 1)).to(self.device)
+            results["beta"] = self.beta_sampler.sample((n,)).to(self.device)
         return results
 
 

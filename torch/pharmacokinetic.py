@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from einops import rearrange
 from vlkit.lrscheduler import CosineScheduler, MultiStepScheduler
 
-from tofts import tofts, tofts3d
+from tofts import tofts, tofts1d, tofts3d
 
 
 def fit_slice(
@@ -126,9 +126,11 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
     aif_t = aif_t.to(ktrans)
     aif_cp = aif_cp.to(ktrans)
     t = t.to(ktrans)
-
-
     orig_shape = list(ktrans.shape)
+
+    n = ktrans.numel()
+    ct1 = tofts1d(ktrans, kep, t0, t.view(1, -1).repeat(n, 1), aif_t.view(1, -1).repeat(n, 1), aif_cp.view(1, -1).repeat(n, 1))
+    return ct1
 
     # AIFs
     if aif_cp.ndim == 1:
@@ -153,6 +155,7 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
     t = t.view(1, 1, -1).repeat(n, 1, 1)
 
     ct = tofts(ktrans, kep, t0, t, aif_t, aif_cp)
+    assert torch.all(ct.squeeze(dim=1) == ct1)
     signal_len = ct.shape[-1]
     output_shape = orig_shape + [signal_len]
     return ct.view(output_shape)
