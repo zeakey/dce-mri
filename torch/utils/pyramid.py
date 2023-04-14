@@ -5,7 +5,6 @@ from torchvision.transforms._functional_tensor import _get_gaussian_kernel1d
 def pyramid1d(x, sigmas=(1, 2, 3)):
     assert isinstance(x, torch.Tensor)
     assert x.ndim == 3
-    n, _, d = x.shape
     pyramid = []
     for s in sigmas:
         pyramid.append(gaussian_filter1d(x, s))
