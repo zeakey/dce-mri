@@ -18,7 +18,7 @@ def gaussian_filter1d(x, sigma, truncate=4):
     kernel = _get_gaussian_kernel1d(
         kernel_size=kernel_size,
         sigma=sigma).view(1, 1, -1)
-    kernel = kernel.expand(dim, 1, kernel.size(-1))
+    kernel = kernel.expand(dim, 1, kernel.size(-1)).to(x)
     padding = (kernel_size - 1) // 2
     x = torch.nn.functional.pad(x, pad=[padding, padding],  mode='replicate')
     y = torch.nn.functional.conv1d(x, kernel, groups=dim)
