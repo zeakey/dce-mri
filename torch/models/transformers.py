@@ -1,7 +1,13 @@
 import torch
 import torch.nn as nn
-from mmcls.models.backbones.vision_transformer import TransformerEncoderLayer
+
+mmcls_transformer = True
+
+if mmcls_transformer:
+    from mmcls.models.backbones.vision_transformer import TransformerEncoderLayer
+
 from mmcv.cnn import MODELS
+from utils import pyramid1d
 
 from collections import OrderedDict
 
@@ -12,6 +18,7 @@ class DCETransformer(nn.Module):
         self,
         seq_len,
         use_grad=False,
+        pyramid_sigmas=None,
         num_layers=2,
         embed_dims=32,
         num_heads=2,
@@ -25,32 +32,39 @@ class DCETransformer(nn.Module):
         self.num_outputs = num_outputs
         self.output_keys = output_keys
         self.use_grad = use_grad
+        self.pyramid_sigmas = pyramid_sigmas
 
+        # input dimension
         if self.use_grad:
             input_dim = 2
         else:
             input_dim = 1
-
+        if self.pyramid_sigmas is not None:
+            input_dim *= len(self.pyramid_sigmas)
         # position embeding for start and end time step
         self.register_buffer('pos_embed', torch.randn(1, seq_len+1, embed_dims))
-        # self.register_buffer('pos_embed0', torch.randn(1, 1, embed_dims))
-        # self.register_buffer('pos_embed1', torch.randn(1, 1, embed_dims))
-
-        # self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dims))
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dims))
 
         self.drop_after_pos = nn.Dropout(p=drop_rate)
         self.linear = nn.Linear(input_dim, embed_dims)
         self.layers = nn.ModuleList()
-
-        # use ReLU to prevent negative outputs
         self.output_layer = nn.ModuleList()
-
         for _ in range(self.num_outputs):
+            # use ReLU to prevent negative outputs
             self.output_layer.append(nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU()))
-
         for _ in range(num_layers):
-            self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
+            if mmcls_transformer:
+                transformer = TransformerEncoderLayer(
+                        embed_dims=embed_dims,
+                        num_heads=num_heads,
+                        feedforward_channels=feedforward_channels)
+            else:
+                transformer = nn.TransformerEncoderLayer(
+                        d_model=embed_dims,
+                        nhead=num_heads,
+                        dim_feedforward=feedforward_channels,
+                        batch_first=True)
+            self.layers.append(transformer)
 
         self.init_weights()
 
@@ -60,159 +74,26 @@ class DCETransformer(nn.Module):
 
     def forward(self, x, t=None):
         B = x.shape[0]
-
         if self.use_grad:
             # gradient of series
             grad = torch.gradient(x, dim=1)[0]
             x = torch.cat((x, grad), dim=2)
 
+        if self.pyramid_sigmas is not None:
+            # [batch length dim] -> [batch dim length]
+            x = pyramid1d(x.transpose(1, 2), sigmas=self.pyramid_sigmas).transpose(1, 2)
         x = self.linear(x)
-
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((x, cls_tokens), dim=1)
-
         x = self.pos_embed + x
         x = self.drop_after_pos(x)
-        
         for layer in self.layers:
             x = layer(x)
         x = x[:, -1, :]
-        
         output = OrderedDict()
-
         for k, layer in zip(self.output_keys, self.output_layer):
             output[k] = layer(x)
         return output
-
-
-@MODELS.register_module()
-class DenoiseTransformer(nn.Module):
-    def __init__(
-        self,
-        seq_len,
-        use_grad=False,
-        num_layers=2,
-        embed_dims=32,
-        num_heads=2,
-        feedforward_channels=32,
-        drop_rate=0
-        ) -> None:
-
-        super().__init__()
-        self.use_grad = use_grad
-
-        if self.use_grad:
-            input_dim = 2
-        else:
-            input_dim = 1
-
-        # position embeding for start and end time step
-        self.register_buffer('pos_embed', torch.randn(1, seq_len, embed_dims))
-        # self.register_buffer('pos_embed0', torch.randn(1, 1, embed_dims))
-        # self.register_buffer('pos_embed1', torch.randn(1, 1, embed_dims))
-
-        self.drop_after_pos = nn.Dropout(p=drop_rate)
-        self.linear = nn.Linear(input_dim, embed_dims)
-        self.layers = nn.ModuleList()
-
-        for _ in range(num_layers):
-            self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
-
-        self.denoise = nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU())
-
-        self.init_weights()
-
-    def init_weights(self):
-        for layer in self.layers:
-            layer.init_weights()
-        self.denoise[0].reset_parameters()
-
-    def forward(self, x, t=None):
-        B = x.shape[0]
-
-        if self.use_grad:
-            # gradient of series
-            grad = torch.gradient(x, dim=1)[0]
-            x = torch.cat((x, grad), dim=2)
-
-        x = self.linear(x)
-
-        x = self.pos_embed + x
-        x = self.drop_after_pos(x)
-
-        for layer in self.layers:
-            x = layer(x)
-        x = self.denoise(x)
-        return x
-    
-
-@MODELS.register_module()
-class DCETransformerIterative(nn.Module):
-    def __init__(
-        self,
-        seq_len=75,
-        num_layers=2,
-        embed_dims=32,
-        num_heads=2,
-        feedforward_channels=32,
-        drop_rate=0
-        ) -> None:
-
-        super().__init__()
-
-        input_dim = 3
-
-        # position embeding for start and end time step
-        self.register_buffer('pos_embed', torch.randn(1, seq_len+1, embed_dims))
-        # self.register_buffer('pos_embed0', torch.randn(1, 1, embed_dims))
-        # self.register_buffer('pos_embed1', torch.randn(1, 1, embed_dims))
-
-        # self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dims))
-        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dims))
-
-        self.drop_after_pos = nn.Dropout(p=drop_rate)
-        self.linear = nn.Linear(input_dim, embed_dims)
-        self.layers = nn.ModuleList()
-
-        # use ReLU to prevent negative outputs
-        self.ktrans = nn.Linear(embed_dims, 1)
-        self.kep = nn.Linear(embed_dims, 1)
-        self.t0 = nn.Linear(embed_dims, 1)
-
-        for _ in range(num_layers):
-            self.layers.append(TransformerEncoderLayer(embed_dims=embed_dims, num_heads=num_heads, feedforward_channels=feedforward_channels))
-
-        self.init_weights()
-
-    def init_weights(self):
-        nn.init.normal_(self.ktrans.weight, std=0.01)
-        nn.init.normal_(self.kep.weight, std=0.01)
-        nn.init.normal_(self.t0.weight, std=0.01)
-
-    def forward(self, x, t=None):
-        B = x.shape[0]
-        
-        ct, reference = x.chunk(dim=2, chunks=2)
-        residual = reference - ct
-        x = torch.cat((ct, reference, residual), dim=2)
-
-        x = self.linear(x)
-
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((x, cls_tokens), dim=1)
-
-        x = self.pos_embed + x
-        x = self.drop_after_pos(x)
-        
-        for layer in self.layers:
-            x = layer(x)
-        x = x[:, -1, :]
-        # x = x.mean(dim=1)
-        
-        ktrans = self.ktrans(x)
-        kep = self.kep(x)
-        t0 = self.t0(x)
-        return ktrans, kep, t0
 
 
 if __name__ == '__main__':
