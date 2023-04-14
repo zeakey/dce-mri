@@ -1,4 +1,5 @@
-import os, warnings
+import os, warnings, re
+from glob import glob
 import os.path as osp
 from datetime import datetime
 
@@ -66,7 +67,9 @@ def find_icad_ktrans(path):
     path = osp.abspath(path)
     assert osp.isdir(path)
     candidates = [i for i in os.listdir(path) if osp.isdir(osp.join(path, i))]
-    candidates = [osp.join(path, i) for i in candidates if 'icad' in i.lower() and ('ktrans' in i.lower() or 'perm' in i.lower())]
+    candidates = [osp.join(path, i) for i in candidates if ('icad' in i.lower() or 'dcad' in i.lower()) and ('ktrans' in i.lower() or 'perm' in i.lower())]
+    if len(candidates) >= 1 and any(['mcc' in c.lower() for c in candidates]):
+        candidates = [c for c in candidates if 'mcc' in c.lower()]
     return candidates if len(candidates) > 0 else None
 
 
@@ -83,9 +86,11 @@ def find_histopathology(patient_id, exp_date):
         warnings.warn(f"{patient_id} cannot find histopathology.")
         return None
     exp_date = datetime.strptime(exp_date, '%Y%m%d').strftime("%Y-%m-%d")
-    hist_dir = osp.join(hist_dir, exp_date)
-    if not osp.isdir(hist_dir):
-        warnings.warn(f"{hist_dir} not exist.")
+
+    if not osp.isdir(osp.join(hist_dir, exp_date)):
+        warnings.warn(f"{osp.join(hist_dir, exp_date)} not exist.")
+        candidates = glob(f"{hist_dir}/*-*-*/")
+        hist_dir = candidates[0] if len(candidates) else None
     return hist_dir
 
 
