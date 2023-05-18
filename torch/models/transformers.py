@@ -1,14 +1,6 @@
 import torch
 import torch.nn as nn
-
-mmcls_transformer = False
-
-if mmcls_transformer:
-    from mmcls.models.backbones.vision_transformer import TransformerEncoderLayer
-    # from mmpretrain.models.backbones.vision_transformer import TransformerEncoderLayer
-
 from mmcv.cnn import MODELS
-# from mmengine.registry import MODELS
 
 from utils import pyramid1d
 
@@ -60,17 +52,11 @@ class DCETransformer(nn.Module):
             # use ReLU to prevent negative outputs
             self.output_layer.append(nn.Sequential(nn.Linear(embed_dims, 1), nn.ReLU()))
         for _ in range(num_layers):
-            if mmcls_transformer:
-                transformer = TransformerEncoderLayer(
-                        embed_dims=embed_dims,
-                        num_heads=num_heads,
-                        feedforward_channels=feedforward_channels)
-            else:
-                transformer = nn.TransformerEncoderLayer(
-                        d_model=embed_dims,
-                        nhead=num_heads,
-                        dim_feedforward=feedforward_channels,
-                        batch_first=True)
+            transformer = nn.TransformerEncoderLayer(
+                    d_model=embed_dims,
+                    nhead=num_heads,
+                    dim_feedforward=feedforward_channels,
+                    batch_first=True)
             self.layers.append(transformer)
 
         self.init_weights()
