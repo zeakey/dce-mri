@@ -5,7 +5,7 @@ aif = 'mixed'
 model = dict(
     num_outputs=5,
     pyramid_sigmas=(1,2,4,6),
-    num_fourier_features=4,
+    num_fourier_features=8,
     output_keys=['ktrans', 'kep', 't0', 'beta', 'noise_scale'])
 
 sampler = dict(

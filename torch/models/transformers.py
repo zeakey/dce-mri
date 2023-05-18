@@ -1,12 +1,15 @@
 import torch
 import torch.nn as nn
 
-mmcls_transformer = True
+mmcls_transformer = False
 
 if mmcls_transformer:
     from mmcls.models.backbones.vision_transformer import TransformerEncoderLayer
+    # from mmpretrain.models.backbones.vision_transformer import TransformerEncoderLayer
 
 from mmcv.cnn import MODELS
+# from mmengine.registry import MODELS
+
 from utils import pyramid1d
 
 from collections import OrderedDict
@@ -19,6 +22,7 @@ class DCETransformer(nn.Module):
         seq_len,
         use_grad=False,
         pyramid_sigmas=None,
+        num_fourier_features=0,
         num_layers=2,
         embed_dims=32,
         num_heads=2,
@@ -33,6 +37,7 @@ class DCETransformer(nn.Module):
         self.output_keys = output_keys
         self.use_grad = use_grad
         self.pyramid_sigmas = pyramid_sigmas
+        self.num_fourier_features = num_fourier_features
 
         # input dimension
         if self.use_grad:
@@ -41,6 +46,8 @@ class DCETransformer(nn.Module):
             input_dim = 1
         if self.pyramid_sigmas is not None:
             input_dim *= len(self.pyramid_sigmas)
+        if self.num_fourier_features > 1:
+            input_dim *= self.num_fourier_features * 2
         # position embeding for start and end time step
         self.register_buffer('pos_embed', torch.randn(1, seq_len+1, embed_dims))
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dims))
@@ -80,8 +87,18 @@ class DCETransformer(nn.Module):
             x = torch.cat((x, grad), dim=2)
 
         if self.pyramid_sigmas is not None:
-            # [batch length dim] -> [batch dim length]
+            # [batch length dim]
             x = pyramid1d(x.transpose(1, 2), sigmas=self.pyramid_sigmas).transpose(1, 2)
+        if self.num_fourier_features > 1:
+            fourier_features = []
+            for freq in range(self.num_fourier_features):
+                fourier_features.append(
+                    torch.cos(x * 2* torch.pi*(freq+1))
+                )
+                fourier_features.append(
+                    torch.sin(x * 2* torch.pi*(freq+1))
+                )
+            x = torch.cat(fourier_features, dim=-1)
         x = self.linear(x)
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((x, cls_tokens), dim=1)
