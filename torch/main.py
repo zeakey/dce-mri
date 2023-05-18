@@ -5,10 +5,11 @@ import os, sys, argparse, time, math
 from einops import rearrange
 from tqdm import tqdm
 import vlkit.plt as vlplt
+from vlkit.utils import get_logger
 from collections import OrderedDict
 
 from mmcv.cnn import MODELS
-from mmcv.utils import Config, DictAction, get_logger
+from mmcv.utils import Config, DictAction
 from mmcv.runner import build_optimizer, set_random_seed
 
 from pharmacokinetic import (
@@ -190,7 +191,7 @@ if __name__ == '__main__':
         output_params = torch.cat(list(output.values()), dim=-1)
 
         if cfg.aif == 'mixed':
-            aif_recon = interp_aif(parker_aif, weinmann_aif, beta=output['beta'])
+            aif_recon = interp_aif(parker_aif, weinmann_aif, beta=output['beta'].squeeze())
             ct_recon = evaluate_curve(output['ktrans'].squeeze(), output['kep'].squeeze(), output['t0'].squeeze(), aif_t=aif_t, aif_cp=aif_recon, t=acquisition_time)
         else:
             ct_recon = evaluate_curve(output['ktrans'].squeeze(), output['kep'].squeeze(), output['t0'].squeeze(), aif_t=aif_t, aif_cp=aif_cp, t=acquisition_time)
