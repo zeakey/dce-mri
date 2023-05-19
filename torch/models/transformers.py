@@ -18,14 +18,13 @@ class DCETransformer(nn.Module):
         num_layers=2,
         embed_dims=32,
         num_heads=2,
-        num_outputs=3,
         output_keys=['ktrans', 'kep', 't0'],
         feedforward_channels=32,
         drop_rate=0
         ) -> None:
 
         super().__init__()
-        self.num_outputs = num_outputs
+        self.num_outputs = len(output_keys)
         self.output_keys = output_keys
         self.use_grad = use_grad
         self.pyramid_sigmas = pyramid_sigmas
@@ -79,10 +78,10 @@ class DCETransformer(nn.Module):
             fourier_features = []
             for freq in range(self.num_fourier_features):
                 fourier_features.append(
-                    torch.cos(x * 2* torch.pi*(freq+1))
+                    torch.sin(x * 2 * torch.pi * (freq + 1))
                 )
                 fourier_features.append(
-                    torch.sin(x * 2* torch.pi*(freq+1))
+                    torch.cos(x * 2 * torch.pi * (freq + 1))
                 )
             x = torch.cat(fourier_features, dim=-1)
         x = self.linear(x)
