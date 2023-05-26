@@ -11,15 +11,17 @@ import torch
 from torch.distributions import Beta
 import numpy as np
 from mmcv.cnn import MODELS
-from mmcv.utils import Config, DictAction, get_logger
+from mmcv.utils import Config, DictAction
+from mmcv.runner import set_random_seed
 
 from tqdm import tqdm
 from einops import rearrange
 
 import mmcv
-from vlkit.image import norm01, norm255
+from vlkit.image import normalize
 from vlkit.medical.dicomio import read_dicoms
 from vlkit.lrscheduler import CosineScheduler
+from vlkit.utils import   get_logger
 
 from scipy.io import loadmat, savemat
 import pydicom
@@ -29,11 +31,10 @@ import os.path as osp
 sys.path.insert(0, '/data1/Code/vlkit/vlkit/medical')
 sys.path.insert(0, '..')
 
-from utils import write_dicom, write_dicom, inference, save_slices_to_dicom, str2int, spatial_loss
-from aif import get_aif, dispersed_aif, interp_aif
-from pharmacokinetic import fit_slice, process_patient, np2torch, evaluate_curve
+from utils import inference, save_slices_to_dicom, str2int
+from aif import get_aif, interp_aif
+from pharmacokinetic import process_patient, evaluate_curve
 from utils import load_dce, find_image_dirs
-from models import DCETransformer
 from pharmacokinetic import calculate_reconstruction_loss
 
 
@@ -43,6 +44,7 @@ def parse_args():
     parser.add_argument('checkpoint', help='checkpoint weights')
     parser.add_argument('--max-iter', type=int, default=50)
     parser.add_argument('--clip-beta', action='store_true')
+    parser.add_argument('--save-path', type=str, default='/tmp/dce-mri')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -84,12 +86,20 @@ def save2dicom(array, save_dir, example_dicom, description, **kwargs):
         **kwargs)
 
 
-def process_patient(cfg, dce_dir, optimize_beta=False):
-    patient_id = dce_dir.split(os.sep)[-3]
-    cad_ktrans_dir = find_image_dirs.find_ktrans_folder(osp.join(dce_dir, '../'))
-    t2_dir = find_image_dirs.find_t2_folder(osp.join(dce_dir, '../'))
+def process_patient(cfg, dce_dir, iterative_refine=True, optimize_beta=True, aif=None):
+    if aif == None:
+        aif = cfg.aif
+    if aif != 'mixed' and optimize_beta:
+        raise RuntimeError(f'aif={aif} and optimize_beta=True')
+    if optimize_beta and not iterative_refine:
+        raise RuntimeError(f'optimize_beta=True, iterative_refine=False')
 
-    if cad_ktrans_dir and t2_dir:
+    patient_id = dce_dir.split(os.sep)[-3]
+    study_dir = osp.join(dce_dir, '../')
+    cad_ktrans_dir = find_image_dirs.find_ktrans_folder(study_dir)
+    t2_dir = find_image_dirs.find_t2_folder(study_dir)
+
+    if cad_ktrans_dir and t2_dir and osirixsr_dir:
         t2w = read_dicoms(t2_dir)
         cad_ktrans = read_dicoms(cad_ktrans_dir)
     else:
@@ -100,110 +110,101 @@ def process_patient(cfg, dce_dir, optimize_beta=False):
     except:
         return None
 
-    weinmann_aif, aif_t = get_aif(aif='weinmann', max_base=6, acquisition_time=dce_data['acquisition_time'], device=cfg.device)
-    parker_aif, _ = get_aif(aif='parker', max_base=6, acquisition_time=dce_data['acquisition_time'], device=cfg.device)
-
     model = MODELS.build(cfg.model).to(cfg.device)
     model.load_state_dict(torch.load(cfg.checkpoint))
 
-    ct = dce_data['ct'].to(cfg.device)
-
     torch.cuda.empty_cache()
     tic = time.time()
+    ct = dce_data['ct'].to(cfg.device)
     output = inference(model, ct)
     del model
 
-    if cfg.aif == 'mixed':
-        ktrans_init, kep_init, t0_init, noise_scale, beta_init = output.values()
-    else:
-        ktrans_init, kep_init, t0_init, noise_scale = output.values()
+    ktrans = output['ktrans']
+    kep = output['kep']
+    t0 = output['t0']
+    noise_scale = output['noise_scale']
+    if aif == 'mixed':
+        beta = output['beta']
 
-    ktrans_init = ktrans_init.squeeze(-1)
-    kep_init = kep_init.squeeze(-1)
-    t0_init = t0_init.squeeze(-1)
+    ktrans = ktrans.squeeze(-1)
+    kep = kep.squeeze(-1)
+    t0 = t0.squeeze(-1)
     noise_scale = noise_scale.squeeze(-1)
 
-    if cfg.aif == 'mixed':
-        beta_init = beta_init.squeeze(-1)
-        aif_cp = interp_aif(parker_aif, weinmann_aif, beta=beta_init)
+    if aif == 'mixed':
+        weinmann_aif, aif_t = get_aif(aif='weinmann', max_base=6, acquisition_time=dce_data['acquisition_time'], device=cfg.device)
+        parker_aif, _ = get_aif(aif='parker', max_base=6, acquisition_time=dce_data['acquisition_time'], device=cfg.device)
+        beta = beta.squeeze(-1)
+        aif_cp = interp_aif(parker_aif, weinmann_aif, beta=beta)
     else:
-        aif_cp = parker_aif
+        aif_cp, aif_t = get_aif(aif=aif, max_base=6, acquisition_time=dce_data['acquisition_time'], device=cfg.device)
 
     toc = time.time()
     logger.info('%.2f seconds' % (toc-tic))
 
-    ct_init = evaluate_curve(ktrans_init, kep_init, t0_init, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp).cpu()
-    loss_init = calculate_reconstruction_loss(
-        ktrans_init,
-        kep_init,
-        t0_init,
+    # ct_hat = evaluate_curve(ktrans, kep, t0, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
+    error = calculate_reconstruction_loss(
+        ktrans,
+        kep,
+        t0,
         ct,
         t=dce_data['acquisition_time'],
         aif_t=aif_t,
-        aif_cp=aif_cp
-    ).cpu()
-    ktrans_init = ktrans_init.cpu()
-    kep_init = kep_init.cpu()
+        aif_cp=aif_cp).cpu()
 
-    torch.cuda.empty_cache()
-    dtype = torch.float32
+    if iterative_refine:
+        logger.info("Start iterative refinement.")
+        torch.cuda.empty_cache()
+        dtype = torch.float32
 
-    # -------------------------------------------------------------------------------------------- #
-    ktrans_iter = ktrans_init.clone().to(device=cfg.device, dtype=dtype).requires_grad_()
-    kep_iter = kep_init.clone().to(ktrans_iter).requires_grad_()
+        # -------------------------------------------------------------------------------------------- #
+        ktrans = ktrans.to(device=cfg.device, dtype=dtype).requires_grad_()
+        kep = kep.to(device=cfg.device, dtype=dtype).requires_grad_()
 
-    if optimize_beta:
-        beta_iter = torch.ones_like(kep_iter).requires_grad_()
-        optimizer = torch.optim.RMSprop(params=[{'params': [ktrans_iter, kep_iter], 'lr': 1e-1}, {'params': [beta_iter], 'lr': 1e-3}])
-        optimizer.param_groups[0]['lr_factor'] = 1
-        optimizer.param_groups[1]['lr_factor'] = 1e2
-    else:
-        optimizer = torch.optim.RMSprop(params=[ktrans_iter, kep_iter], lr=1e-3)
-        optimizer.param_groups[0]['lr_factor'] = 1
-
-    aif_t = aif_t.to(ktrans_iter)
-    ct = ct.to(ktrans_iter)
-    
-    scheduler = CosineScheduler(epoch_iters=cfg.max_iter, epochs=1, warmup_iters=cfg.max_iter//10, max_lr=1e-3, min_lr=1e-6)
-
-    for i in range(cfg.max_iter):
         if optimize_beta:
-            aif_cp = interp_aif(parker_aif, weinmann_aif, beta_iter)
+            beta = beta.requires_grad_()
+            optimizer = torch.optim.RMSprop(params=[{'params': [ktrans, kep], 'lr': 1e-1}, {'params': [beta], 'lr': 1e-3}])
+            optimizer.param_groups[0]['lr_factor'] = 1
+            optimizer.param_groups[1]['lr_factor'] = 1e2
         else:
-            aif_cp = parker_aif
-        ct_iter = evaluate_curve(ktrans_iter, kep_iter, t0_init, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
-        loss_iter = torch.nn.functional.l1_loss(ct_iter, ct, reduction='none').sum(dim=-1)
-        loss = loss_iter.mean()
+            optimizer = torch.optim.RMSprop(params=[ktrans, kep], lr=1e-3)
+            optimizer.param_groups[0]['lr_factor'] = 1
 
-        lr = scheduler.step()
-        for pg in optimizer.param_groups:
-            pg['lr'] = lr * pg['lr_factor']
+        aif_t = aif_t.to(ktrans)
+        ct = ct.to(ktrans)
+        
+        scheduler = CosineScheduler(epoch_iters=cfg.max_iter, epochs=1, warmup_iters=cfg.max_iter//10, max_lr=1e-3, min_lr=1e-6)
 
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-        if optimize_beta and cfg.clip_beta:
-            beta_iter.data.clamp_(-0.2, 1.2)
-        logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.4f}")
+        for i in range(cfg.max_iter):
+            if optimize_beta:
+                aif_cp = interp_aif(parker_aif, weinmann_aif, beta)
+            ct_hat = evaluate_curve(ktrans, kep, t0, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
+            error = torch.nn.functional.l1_loss(ct_hat, ct, reduction='none').mean(dim=-1)
+            loss = error.mean()
+
+            lr = scheduler.step()
+            for pg in optimizer.param_groups:
+                pg['lr'] = lr * pg['lr_factor']
+
+            loss.mean().backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            if optimize_beta and cfg.clip_beta:
+                beta.data.clamp_(0, 1)
+            logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.4f}")
 
     results = dict(
         patient_id=patient_id,
-        ktrans_init=ktrans_init.detach().cpu(),
-        kep_init=kep_init.detach().cpu(),
-        t0_init=t0_init.detach().cpu(),
-        ct=ct.detach().cpu(),
-        ct_init=ct_init.detach().cpu(),
-        ct_iter=ct_iter.detach().cpu(),
-        ktrans_iter=ktrans_iter.detach().cpu(),
-        kep_iter=kep_iter.detach().cpu(),
-        loss_iter=loss_iter.detach().cpu(),
-        t2w=t2w,
-        cad_ktrans=cad_ktrans)
-    if optimize_beta:
-        results['aif_cp'] = aif_cp.detach().cpu()
-        results['parker_aif'] = parker_aif.detach().cpu()
-        results['weinmann_aif'] = weinmann_aif.detach().cpu()
-        results['beta_iter'] = beta_iter.detach().cpu()
+        ktrans=ktrans,
+        kep=kep,
+        t0=t0,
+        ct=ct,
+        error=error,
+        t2w=t2w
+    )
+    for k, v in results.items():
+        if isinstance(v, torch.Tensor):
+            results[k] = v.detach().cpu()
     torch.cuda.empty_cache()
     return results
 
@@ -218,94 +219,117 @@ if __name__ == '__main__':
         cfg.merge_from_dict(args.cfg_options)
 
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
-    log_file = osp.join(cfg.work_dir, f'infeerence_{timestamp}.log')
+    log_file = osp.join(args.save_path, f'infeerence_{timestamp}.log')
     logger = get_logger(name="DCE (inference)", log_file=log_file)
     logger.info(cfg)
 
     np.random.seed(0)
-    mmcv.runner.utils.set_random_seed(0)
+    set_random_seed(0)
     cfg['device'] = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
-    save_dir = f'{cfg.work_dir}/results-{timestamp}/'
-    logger.info(f'Save results to {save_dir}')
-    for dce_dir in find_image_dirs.find_dce_folders('data/test-data'):
+    if args.save_path is None:
+        args.save_path = f'{cfg.work_dir}/results-{timestamp}/'
+
+    logger.info(f'Save results to {args.save_path}')
+    for idx, dce_dir in enumerate(find_image_dirs.find_dce_folders('data/test-data')):
         patient_id, exp_date = dce_dir.split(os.sep)[-3:-1]
         histopathology_dir = find_image_dirs.find_histopathology(patient_id, exp_date)
-        iCAD_Ktrans_dir = find_image_dirs.find_icad_ktrans(osp.abspath(osp.join(dce_dir, '../')))
 
-        if histopathology_dir is None or iCAD_Ktrans_dir is None:
+        study_dir = osp.abspath(osp.join(dce_dir, '../'))
+        iCAD_Ktrans_dir = find_image_dirs.find_icad_ktrans(study_dir)
+        osirixsr_dir = find_image_dirs.find_osirixsr(study_dir)
+
+        if histopathology_dir is None or iCAD_Ktrans_dir is None or osirixsr_dir is None:
+            if histopathology_dir:
+                logger.warn(f"{patient_id}: cannot find histopathology")
+            if iCAD_Ktrans_dir:
+                logger.warn(f"{patient_id}: cannot find iCAD_Ktrans_dir")
             continue
 
-        save_dir1 = f'{save_dir}/{patient_id}'
-        if osp.isdir(save_dir1):
-            logger.info(f'{save_dir1} exists, pass.')
+        if osp.isdir(f'{args.save_path}/{patient_id}'):
+            logger.info(f'{args.save_path}/{patient_id} exists, pass.')
             continue
-        results = process_patient(cfg, dce_dir)
-        results_beta = process_patient(cfg, dce_dir, optimize_beta=True)
-        if results is not None:
-            t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
-            t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
-            t2w = rearrange(t2w, '1 c h w -> h w c').numpy()
-            ct = results['ct']
-            ct_init = results['ct_init']
-            ct_iter = results['ct_iter']
-            ct_iter_beta = results_beta['ct_iter']
-            beta = results_beta['beta_iter']
-            parker_aif = results_beta['parker_aif']
-            weinmann_aif = results_beta['weinmann_aif']
-            aif = results_beta['aif_cp']
-            results_beta['beta_iter'] -= results_beta['beta_iter'].min()
 
-            save2dicom(results['ktrans_iter'], save_dir=save_dir1, example_dicom=results['t2w'], description='Ktrans')
-            save2dicom(results_beta['ktrans_iter'], save_dir=save_dir1, example_dicom=results['t2w'], description='Ktrans-beta')
-            save2dicom(results_beta['beta_iter'], save_dir=save_dir1, example_dicom=results['t2w'], description='beta')
+        for aif in ['parker', 'weinmann', 'mixed']:
+            logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
+            results = process_patient(cfg, dce_dir, aif=aif, optimize_beta=aif=='mixed')
+            if results is not None:
+                t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
+                t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
+                t2w = rearrange(t2w, '1 c h w -> h w c').numpy()
+                ct = results['ct']
+                ktrans = results['ktrans']
+                kep = results['kep']
+                error = results['error']
+                if 'beta' in results:
+                    beta = results['beta']
+                else:
+                    beta = None
 
-            h, w = results['ktrans_iter'].shape[:2]
-            n = 100
-            mask = torch.zeros(h, w)
-            y_t, y_b = 70, 120
-            x_l, x_r = 60, 100
-            mask[y_t:y_b, x_l:x_r] = 1
-            mask = mask.nonzero()
-            selected = mask[torch.randperm(mask.size(0))[:n]]
-            ncol = 7
-            fig, axes = plt.subplots(n, ncol, figsize=(ncol*4, n*4))
-            vlplt.clear_ticks(axes)
+            example_dcm = read_dicoms(dce_dir)[:20]
+            save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF')
+            save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF')
+            save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF')
+            if beta is not None:
+                save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta')
+                beta = normalize(beta, upper_bound=1)
+                if aif == 'mixed':
+                    ktrans_x_beta = ktrans * beta
+                    save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta')
 
-            kv = OrderedDict(
-                t2w=t2w,
-                ktrans_init=results['ktrans_init'].numpy(),
-                ktrans_iter=results['ktrans_iter'].numpy(),
-                ktrans_iter_beta=results_beta['ktrans_iter'].numpy(),
-                beta =results_beta['beta_iter'].numpy())
+            # h, w = results['ktrans_iter'].shape[:2]
+            # n = 100
+            # mask = torch.zeros(h, w)
+            # y_t, y_b = 70, 120
+            # x_l, x_r = 60, 100
+            # mask[y_t:y_b, x_l:x_r] = 1
+            # mask = mask.nonzero()
+            # selected = mask[torch.randperm(mask.size(0))[:n]]
+            # ncol = 7
+            # fig, axes = plt.subplots(n, ncol, figsize=(ncol*4, n*4))
+            # vlplt.clear_ticks(axes)
 
-            for i in range(n):
-                y, x = selected[i]
-                z = np.random.choice(range(6, 15))
-                axes[i, 0].plot(ct[y, x, z, :], color='black')
-                axes[i, 0].plot(ct_init[y, x, z, :], color='blue')
-                axes[i, 0].plot(ct_iter[y, x, z, :], color='green')
-                axes[i, 0].plot(ct_iter_beta[y, x, z, :], color='pink')
-                axes[i, 0].legend(['data', 'init', 'iter', f'iter ($\\beta$={beta[y, x, z]:.2f})'])
-                axes[i, 0].set_title(f'{x},{y},{z}')
+            # kv = OrderedDict(
+            #     t2w=t2w,
+            #     ktrans_init=results['ktrans_init'].numpy(),
+            #     ktrans_iter=results['ktrans_iter'].numpy(),
+            #     ktrans_iter_beta=results_beta['ktrans_iter'].numpy(),
+            #     beta =results_beta['beta_iter'].numpy())
 
-                axes[i, 1].plot(parker_aif, color='r')
-                axes[i, 1].plot(weinmann_aif, color='g')
-                axes[i, 1].plot(aif[y, x, z, :], color='black')
-                axes[i, 1].legend(['Parker', 'Weinmann', 'Interp'])
+            # for i in range(n):
+            #     y, x = selected[i]
+            #     z = np.random.choice(range(6, 15))
+            #     axes[i, 0].plot(ct[y, x, z, :], color='black')
+            #     axes[i, 0].plot(ct_init[y, x, z, :], color='blue')
+            #     axes[i, 0].plot(ct_iter[y, x, z, :], color='green')
+            #     axes[i, 0].plot(ct_iter_beta[y, x, z, :], color='pink')
+            #     axes[i, 0].legend(['data', 'init', 'iter', f'iter ($\\beta$={beta[y, x, z]:.2f})'])
+            #     axes[i, 0].set_title(f'{x},{y},{z}')
 
-                for j, (k, v) in enumerate(kv.items()):
-                    axes[i, j+2].imshow(norm01(v[:, :, z]))
-                    roi = matplotlib.patches.Rectangle((x_l, y_t), width=x_r-x_l, height=y_b-y_t, edgecolor='r', facecolor='none')
-                    axes[i, j+2].scatter(x, y, marker='x', color='red')
-                    axes[i, j+2].add_patch(roi)
-                    axes[i, j+2].set_title(k, fontsize=24)
-            plt.tight_layout()
-            plt.savefig(f'{save_dir}/{patient_id}/ct.pdf')
+            #     axes[i, 1].plot(parker_aif, color='r')
+            #     axes[i, 1].plot(weinmann_aif, color='g')
+            #     axes[i, 1].plot(aif[y, x, z, :], color='black')
+            #     axes[i, 1].legend(['Parker', 'Weinmann', 'Interp'])
 
-            dst = osp.join(f'{save_dir}/{patient_id}', 'histopathology')
-            shutil.copytree(histopathology_dir, dst)
-            for d in iCAD_Ktrans_dir:
-                dst = osp.join(f'{save_dir}/{patient_id}', d.split(os.sep)[-1])
-                shutil.copytree(d, dst)
+            #     for j, (k, v) in enumerate(kv.items()):
+            #         axes[i, j+2].imshow(normalize(v[:, :, z], upper_bound=1))
+            #         roi = matplotlib.patches.Rectangle((x_l, y_t), width=x_r-x_l, height=y_b-y_t, edgecolor='r', facecolor='none')
+            #         axes[i, j+2].scatter(x, y, marker='x', color='red')
+            #         axes[i, j+2].add_patch(roi)
+            #         axes[i, j+2].set_title(k, fontsize=24)
+            # plt.tight_layout()
+            # plt.savefig(f'{args.save_path}/{patient_id}/ct.pdf')
+            # plt.close()
+
+        dst = osp.join(f'{args.save_path}/{patient_id}', 'histopathology')
+        if not osp.isdir(histopathology_dir):
+            print('?')
+        shutil.copytree(histopathology_dir, dst, dirs_exist_ok=True)
+
+        shutil.copytree(osirixsr_dir, osp.join(f'{args.save_path}/{patient_id}', 'OSIRIX_SR'), dirs_exist_ok=True)
+        for d in iCAD_Ktrans_dir:
+            dst = osp.join(f'{args.save_path}/{patient_id}', d.split(os.sep)[-1])
+            shutil.copytree(d, dst)
+        if idx >= 4:
+            break

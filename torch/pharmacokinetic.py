@@ -2,9 +2,6 @@ from multiprocessing import reduction
 import torch, math, os, pydicom, warnings
 import os.path as osp
 import numpy as np
-import matplotlib
-matplotlib.use('agg')
-import matplotlib.pyplot as plt
 from einops import rearrange
 from vlkit.lrscheduler import CosineScheduler, MultiStepScheduler
 
@@ -126,11 +123,19 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
     aif_t = aif_t.to(ktrans)
     aif_cp = aif_cp.to(ktrans)
     t = t.to(ktrans)
-    orig_shape = list(ktrans.shape)
 
+    orig_shape = list(ktrans.shape)
     n = ktrans.numel()
-    ct1 = tofts1d(ktrans, kep, t0, t.view(1, -1).repeat(n, 1), aif_t.view(1, -1).repeat(n, 1), aif_cp.view(1, -1).repeat(n, 1))
-    return ct1
+    if aif_cp.ndim==1 or (aif_cp.ndim == 2 and aif_cp.size(0) == 1):
+        aif_cp = aif_cp.view(1, -1).repeat(n, 1)
+    elif aif_cp.ndim == 2:
+        pass
+    elif aif_cp.ndim == len(orig_shape) + 1:
+        aif_cp = rearrange(aif_cp, 'h w s d -> (h w s) d')
+    else:
+        raise ValueError(f"invalid shape {aif_cp.shape}")
+    ct1 = tofts1d(ktrans.view(n), kep.view(n), t0.view(n), t.view(1, -1).repeat(n, 1), aif_t.view(1, -1).repeat(n, 1), aif_cp)
+    return ct1.view(orig_shape + [-1])
 
     # AIFs
     if aif_cp.ndim == 1:
@@ -164,7 +169,7 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
 def calculate_reconstruction_loss(ktrans, kep, t0, ct, t, aif_t, aif_cp, relative=False):
     assert ktrans.shape == kep.shape == t0.shape
     ct_recon = evaluate_curve(ktrans, kep, t0, aif_t=aif_t, aif_cp=aif_cp, t=t)
-    loss = torch.nn.functional.l1_loss(ct_recon, ct, reduction='none').sum(dim=-1)
+    loss = torch.nn.functional.l1_loss(ct_recon, ct, reduction='none').mean(dim=-1)
     if relative:
         ct_sum = ct.sum(dim=-1)
         loss = loss / ct_sum
