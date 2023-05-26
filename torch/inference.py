@@ -191,7 +191,7 @@ def process_patient(cfg, dce_dir, iterative_refine=True, optimize_beta=True, aif
             optimizer.zero_grad()
             if optimize_beta and cfg.clip_beta:
                 beta.data.clamp_(0, 1)
-            logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.4f}")
+            logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
 
     results = dict(
         patient_id=patient_id,
