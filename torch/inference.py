@@ -19,7 +19,7 @@ from einops import rearrange
 
 import mmcv
 from vlkit.image import normalize
-from vlkit.medical.dicomio import read_dicoms
+from vlkit.dicom.dicomio import read_dicoms
 from vlkit.lrscheduler import CosineScheduler
 from vlkit.utils import   get_logger
 
@@ -86,13 +86,11 @@ def save2dicom(array, save_dir, example_dicom, description, **kwargs):
         **kwargs)
 
 
-def process_patient(cfg, dce_dir, iterative_refine=True, optimize_beta=True, aif=None):
+def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
     if aif == None:
         aif = cfg.aif
-    if aif != 'mixed' and optimize_beta:
+    if aif != 'mixed':
         raise RuntimeError(f'aif={aif} and optimize_beta=True')
-    if optimize_beta and not iterative_refine:
-        raise RuntimeError(f'optimize_beta=True, iterative_refine=False')
 
     patient_id = dce_dir.split(os.sep)[-3]
     study_dir = osp.join(dce_dir, '../')
@@ -105,10 +103,7 @@ def process_patient(cfg, dce_dir, iterative_refine=True, optimize_beta=True, aif
     else:
         logger.info(f"{patient_id}: cannot find t2w or cad_ktrans, pass")
         return None
-    try:
-        dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
-    except:
-        return None
+    dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
 
     model = MODELS.build(cfg.model).to(cfg.device)
     model.load_state_dict(torch.load(cfg.checkpoint))
@@ -160,10 +155,11 @@ def process_patient(cfg, dce_dir, iterative_refine=True, optimize_beta=True, aif
         # -------------------------------------------------------------------------------------------- #
         ktrans = ktrans.to(device=cfg.device, dtype=dtype).requires_grad_()
         kep = kep.to(device=cfg.device, dtype=dtype).requires_grad_()
+        t0 = t0.to(device=cfg.device, dtype=dtype).requires_grad_()
 
-        if optimize_beta:
+        if aif == 'mixed':
             beta = beta.requires_grad_()
-            optimizer = torch.optim.RMSprop(params=[{'params': [ktrans, kep], 'lr': 1e-1}, {'params': [beta], 'lr': 1e-3}])
+            optimizer = torch.optim.RMSprop(params=[{'params': [ktrans, kep, t0], 'lr': 1e-1}, {'params': [beta], 'lr': 1e-3}])
             optimizer.param_groups[0]['lr_factor'] = 1
             optimizer.param_groups[1]['lr_factor'] = 1e2
         else:
@@ -172,14 +168,14 @@ def process_patient(cfg, dce_dir, iterative_refine=True, optimize_beta=True, aif
 
         aif_t = aif_t.to(ktrans)
         ct = ct.to(ktrans)
-        
+
         scheduler = CosineScheduler(epoch_iters=cfg.max_iter, epochs=1, warmup_iters=cfg.max_iter//10, max_lr=1e-3, min_lr=1e-6)
 
         for i in range(cfg.max_iter):
-            if optimize_beta:
+            if aif == 'mixed':
                 aif_cp = interp_aif(parker_aif, weinmann_aif, beta)
             ct_hat = evaluate_curve(ktrans, kep, t0, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
-            error = torch.nn.functional.l1_loss(ct_hat, ct, reduction='none').mean(dim=-1)
+            error = torch.nn.functional.l1_loss(ct_hat, ct, reduction='none').sum(dim=-1)
             loss = error.mean()
 
             lr = scheduler.step()
@@ -189,7 +185,7 @@ def process_patient(cfg, dce_dir, iterative_refine=True, optimize_beta=True, aif
             loss.mean().backward()
             optimizer.step()
             optimizer.zero_grad()
-            if optimize_beta and cfg.clip_beta:
+            if aif == 'mixed' and cfg.clip_beta:
                 beta.data.clamp_(0, 1)
             logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
 
@@ -202,6 +198,9 @@ def process_patient(cfg, dce_dir, iterative_refine=True, optimize_beta=True, aif
         error=error,
         t2w=t2w
     )
+    if aif == 'mixed':
+        results['beta'] = beta
+
     for k, v in results.items():
         if isinstance(v, torch.Tensor):
             results[k] = v.detach().cpu()
@@ -253,19 +252,26 @@ if __name__ == '__main__':
 
         for aif in ['parker', 'weinmann', 'mixed']:
             logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
-            results = process_patient(cfg, dce_dir, aif=aif, optimize_beta=aif=='mixed')
-            if results is not None:
-                t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
-                t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
-                t2w = rearrange(t2w, '1 c h w -> h w c').numpy()
-                ct = results['ct']
-                ktrans = results['ktrans']
-                kep = results['kep']
-                error = results['error']
-                if 'beta' in results:
-                    beta = results['beta']
-                else:
-                    beta = None
+
+            try:
+                results = process_patient(cfg, dce_dir, aif=aif)
+            except:
+                continue
+
+            if results is None:
+                logger.warn(f'Patient {patient_id} result is.')
+                continue
+            t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
+            t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
+            t2w = rearrange(t2w, '1 c h w -> h w c').numpy()
+            ct = results['ct']
+            ktrans = results['ktrans']
+            kep = results['kep']
+            error = results['error']
+            if 'beta' in results:
+                beta = results['beta']
+            else:
+                beta = None
 
             example_dcm = read_dicoms(dce_dir)[:20]
             save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF')
@@ -277,50 +283,6 @@ if __name__ == '__main__':
                 if aif == 'mixed':
                     ktrans_x_beta = ktrans * beta
                     save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta')
-
-            # h, w = results['ktrans_iter'].shape[:2]
-            # n = 100
-            # mask = torch.zeros(h, w)
-            # y_t, y_b = 70, 120
-            # x_l, x_r = 60, 100
-            # mask[y_t:y_b, x_l:x_r] = 1
-            # mask = mask.nonzero()
-            # selected = mask[torch.randperm(mask.size(0))[:n]]
-            # ncol = 7
-            # fig, axes = plt.subplots(n, ncol, figsize=(ncol*4, n*4))
-            # vlplt.clear_ticks(axes)
-
-            # kv = OrderedDict(
-            #     t2w=t2w,
-            #     ktrans_init=results['ktrans_init'].numpy(),
-            #     ktrans_iter=results['ktrans_iter'].numpy(),
-            #     ktrans_iter_beta=results_beta['ktrans_iter'].numpy(),
-            #     beta =results_beta['beta_iter'].numpy())
-
-            # for i in range(n):
-            #     y, x = selected[i]
-            #     z = np.random.choice(range(6, 15))
-            #     axes[i, 0].plot(ct[y, x, z, :], color='black')
-            #     axes[i, 0].plot(ct_init[y, x, z, :], color='blue')
-            #     axes[i, 0].plot(ct_iter[y, x, z, :], color='green')
-            #     axes[i, 0].plot(ct_iter_beta[y, x, z, :], color='pink')
-            #     axes[i, 0].legend(['data', 'init', 'iter', f'iter ($\\beta$={beta[y, x, z]:.2f})'])
-            #     axes[i, 0].set_title(f'{x},{y},{z}')
-
-            #     axes[i, 1].plot(parker_aif, color='r')
-            #     axes[i, 1].plot(weinmann_aif, color='g')
-            #     axes[i, 1].plot(aif[y, x, z, :], color='black')
-            #     axes[i, 1].legend(['Parker', 'Weinmann', 'Interp'])
-
-            #     for j, (k, v) in enumerate(kv.items()):
-            #         axes[i, j+2].imshow(normalize(v[:, :, z], upper_bound=1))
-            #         roi = matplotlib.patches.Rectangle((x_l, y_t), width=x_r-x_l, height=y_b-y_t, edgecolor='r', facecolor='none')
-            #         axes[i, j+2].scatter(x, y, marker='x', color='red')
-            #         axes[i, j+2].add_patch(roi)
-            #         axes[i, j+2].set_title(k, fontsize=24)
-            # plt.tight_layout()
-            # plt.savefig(f'{args.save_path}/{patient_id}/ct.pdf')
-            # plt.close()
 
         dst = osp.join(f'{args.save_path}/{patient_id}', 'histopathology')
         if not osp.isdir(histopathology_dir):

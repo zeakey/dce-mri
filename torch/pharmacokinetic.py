@@ -169,7 +169,7 @@ def evaluate_curve(ktrans, kep, t0, aif_t, aif_cp, t):
 def calculate_reconstruction_loss(ktrans, kep, t0, ct, t, aif_t, aif_cp, relative=False):
     assert ktrans.shape == kep.shape == t0.shape
     ct_recon = evaluate_curve(ktrans, kep, t0, aif_t=aif_t, aif_cp=aif_cp, t=t)
-    loss = torch.nn.functional.l1_loss(ct_recon, ct, reduction='none').mean(dim=-1)
+    loss = torch.nn.functional.l1_loss(ct_recon, ct, reduction='none').sum(dim=-1)
     if relative:
         ct_sum = ct.sum(dim=-1)
         loss = loss / ct_sum
