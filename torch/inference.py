@@ -43,7 +43,6 @@ def parse_args():
     parser.add_argument('config', help='train config file path')
     parser.add_argument('checkpoint', help='checkpoint weights')
     parser.add_argument('--max-iter', type=int, default=50)
-    parser.add_argument('--clip-beta', action='store_true')
     parser.add_argument('--save-path', type=str, default='/tmp/dce-mri')
     parser.add_argument(
         '--cfg-options',
@@ -89,8 +88,6 @@ def save2dicom(array, save_dir, example_dicom, description, **kwargs):
 def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
     if aif == None:
         aif = cfg.aif
-    if aif != 'mixed':
-        raise RuntimeError(f'aif={aif} and optimize_beta=True')
 
     patient_id = dce_dir.split(os.sep)[-3]
     study_dir = osp.join(dce_dir, '../')
@@ -101,7 +98,7 @@ def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
         t2w = read_dicoms(t2_dir)
         cad_ktrans = read_dicoms(cad_ktrans_dir)
     else:
-        logger.info(f"{patient_id}: cannot find t2w or cad_ktrans, pass")
+        logger.warn(f"{patient_id}: cannot find t2w or cad_ktrans, pass")
         return None
     dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
 
@@ -185,8 +182,7 @@ def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
             loss.mean().backward()
             optimizer.step()
             optimizer.zero_grad()
-            if aif == 'mixed' and cfg.clip_beta:
-                beta.data.clamp_(0, 1)
+            beta.data.clamp_(0, 1)
             logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
 
     results = dict(
@@ -213,7 +209,6 @@ if __name__ == '__main__':
     cfg = Config.fromfile(args.config)
     cfg['checkpoint'] = args.checkpoint
     cfg['max_iter'] = args.max_iter
-    cfg['clip_beta'] = args.clip_beta
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
@@ -250,7 +245,7 @@ if __name__ == '__main__':
             logger.info(f'{args.save_path}/{patient_id} exists, pass.')
             continue
 
-        for aif in ['parker', 'weinmann', 'mixed']:
+        for aif in ['mixed', 'parker', 'weinmann']:
             logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
 
             try:
@@ -281,7 +276,7 @@ if __name__ == '__main__':
                 save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta')
                 beta = normalize(beta, upper_bound=1)
                 if aif == 'mixed':
-                    ktrans_x_beta = ktrans * beta
+                    ktrans_x_beta = ktrans * beta.exp()
                     save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta')
 
         dst = osp.join(f'{args.save_path}/{patient_id}', 'histopathology')
