@@ -20,7 +20,7 @@ from einops import rearrange
 import mmcv
 from vlkit.image import normalize
 from vlkit.dicom.dicomio import read_dicoms
-from vlkit.lrscheduler import CosineScheduler
+from vlkit.lrscheduler import CosineScheduler, MultiStepScheduler
 from vlkit.utils import   get_logger
 
 from scipy.io import loadmat, savemat
@@ -40,6 +40,7 @@ from pharmacokinetic import calculate_reconstruction_loss
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
+    parser.add_argument('data', help='data path')
     parser.add_argument('config', help='train config file path')
     parser.add_argument('checkpoint', help='checkpoint weights')
     parser.add_argument('--max-iter', type=int, default=50)
@@ -85,9 +86,11 @@ def save2dicom(array, save_dir, example_dicom, description, **kwargs):
         **kwargs)
 
 
-def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
+def process_patient(cfg, dce_dir, init='nn', refine=True, aif=None, max_iter=100, max_lr=1e-3, min_lr=1e-6):
     if aif == None:
         aif = cfg.aif
+
+    assert init in ['nn', 'random']
 
     patient_id = dce_dir.split(os.sep)[-3]
     study_dir = osp.join(dce_dir, '../')
@@ -100,28 +103,48 @@ def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
     else:
         logger.warn(f"{patient_id}: cannot find t2w or cad_ktrans, pass")
         return None
-    dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
+    try:
+        dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
+    except Exception as e:
+        logger.warn(f"Cannot load DCE data from {dce_dir}: {e}")
+        return None
 
-    model = MODELS.build(cfg.model).to(cfg.device)
-    model.load_state_dict(torch.load(cfg.checkpoint))
-
-    torch.cuda.empty_cache()
-    tic = time.time()
+    # get the mask determining which voxels will be processed
+    # time series whose maximal value is less then 1/100 times the global maximum will be ignored
     ct = dce_data['ct'].to(cfg.device)
-    output = inference(model, ct)
-    del model
+    h, w, slices, frames = ct.shape
+    mask = ct.max(dim=-1).values >= ct.max(dim=-1).values.max() / 100
+    N = mask.sum()
+    data = ct[mask]
 
-    ktrans = output['ktrans']
-    kep = output['kep']
-    t0 = output['t0']
-    noise_scale = output['noise_scale']
-    if aif == 'mixed':
-        beta = output['beta']
+    if init == 'nn':
+        model = MODELS.build(cfg.model).to(cfg.device)
+        model.load_state_dict(torch.load(cfg.checkpoint))
 
-    ktrans = ktrans.squeeze(-1)
-    kep = kep.squeeze(-1)
-    t0 = t0.squeeze(-1)
-    noise_scale = noise_scale.squeeze(-1)
+        torch.cuda.empty_cache()
+        tic = time.time()
+        output = inference(model, data)
+        toc = time.time()
+        logger.info('%.2f seconds' % (toc-tic))
+        del model
+
+        ktrans = output['ktrans']
+        kep = output['kep']
+        t0 = output['t0']
+        if aif == 'mixed':
+            beta = output['beta']
+        ktrans = ktrans.squeeze(-1)
+        kep = kep.squeeze(-1)
+        t0 = t0.squeeze(-1)
+    elif init == 'random':
+        shape = dce_data['ct'].shape[:-1]
+        ktrans = torch.rand(data.size(0)).to(cfg.device)
+        kep = torch.rand(data.size(0)).to(ktrans)
+        t0 = torch.rand(data.size(0)).to(ktrans)
+        if aif == 'mixed':
+            beta = torch.rand(data.size(0)).to(ktrans)
+    else:
+        raise ValueError(init)
 
     if aif == 'mixed':
         weinmann_aif, aif_t = get_aif(aif='weinmann', max_base=6, acquisition_time=dce_data['acquisition_time'], device=cfg.device)
@@ -131,28 +154,14 @@ def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
     else:
         aif_cp, aif_t = get_aif(aif=aif, max_base=6, acquisition_time=dce_data['acquisition_time'], device=cfg.device)
 
-    toc = time.time()
-    logger.info('%.2f seconds' % (toc-tic))
-
-    # ct_hat = evaluate_curve(ktrans, kep, t0, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
-    error = calculate_reconstruction_loss(
-        ktrans,
-        kep,
-        t0,
-        ct,
-        t=dce_data['acquisition_time'],
-        aif_t=aif_t,
-        aif_cp=aif_cp).cpu()
-
-    if iterative_refine:
+    if refine:
         logger.info("Start iterative refinement.")
         torch.cuda.empty_cache()
-        dtype = torch.float32
 
         # -------------------------------------------------------------------------------------------- #
-        ktrans = ktrans.to(device=cfg.device, dtype=dtype).requires_grad_()
-        kep = kep.to(device=cfg.device, dtype=dtype).requires_grad_()
-        t0 = t0.to(device=cfg.device, dtype=dtype).requires_grad_()
+        ktrans = ktrans.to(device=cfg.device).requires_grad_()
+        kep = kep.to(device=cfg.device).requires_grad_()
+        t0 = t0.to(device=cfg.device).requires_grad_()
 
         if aif == 'mixed':
             beta = beta.requires_grad_()
@@ -160,19 +169,20 @@ def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
             optimizer.param_groups[0]['lr_factor'] = 1
             optimizer.param_groups[1]['lr_factor'] = 1e2
         else:
-            optimizer = torch.optim.RMSprop(params=[ktrans, kep], lr=1e-3)
+            optimizer = torch.optim.RMSprop(params=[ktrans, kep, t0], lr=1e-3)
             optimizer.param_groups[0]['lr_factor'] = 1
 
         aif_t = aif_t.to(ktrans)
-        ct = ct.to(ktrans)
+        data = data.to(ktrans)
 
-        scheduler = CosineScheduler(epoch_iters=cfg.max_iter, epochs=1, warmup_iters=cfg.max_iter//10, max_lr=1e-3, min_lr=1e-6)
+        # scheduler = CosineScheduler(epoch_iters=max_iter, epochs=1, warmup_iters=0, max_lr=max_lr, min_lr=min_lr)
+        scheduler = MultiStepScheduler(iters=max_iter, gamma=0.1, milestones=[int(max_iter*3/4), int(max_iter*7/8)], base_lr=max_lr)
 
-        for i in range(cfg.max_iter):
+        for i in range(max_iter):
             if aif == 'mixed':
                 aif_cp = interp_aif(parker_aif, weinmann_aif, beta)
             ct_hat = evaluate_curve(ktrans, kep, t0, t=dce_data['acquisition_time'], aif_t=aif_t, aif_cp=aif_cp)
-            error = torch.nn.functional.l1_loss(ct_hat, ct, reduction='none').sum(dim=-1)
+            error = torch.nn.functional.l1_loss(ct_hat, data, reduction='none').sum(dim=-1)
             loss = error.mean()
 
             lr = scheduler.step()
@@ -182,20 +192,36 @@ def process_patient(cfg, dce_dir, iterative_refine=True, aif=None):
             loss.mean().backward()
             optimizer.step()
             optimizer.zero_grad()
-            beta.data.clamp_(0, 1)
-            logger.info(f"{patient_id}: [{i+1:03d}/{cfg.max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
+            if aif == 'mixed':
+                beta.data.clamp_(0, 1)
+            if (i+1) % 10 == 0:
+                logger.info(f"{patient_id}: [{i+1:03d}/{max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
+
+    ktrans_map = torch.zeros(h, w, slices).to(ktrans)
+    kep_map = torch.zeros(h, w, slices).to(ktrans)
+    t0_map = torch.zeros(h, w, slices).to(ktrans)
+    error_map = torch.zeros(h, w, slices).to(ktrans)
+
+    ktrans_map[mask] = ktrans
+    kep_map[mask] = kep
+    t0_map[mask] = t0
+    error_map[mask] = error
+
+    if aif == 'mixed':
+        beta_map = torch.zeros(h, w, slices).to(ktrans)
+        beta_map = torch.zeros(h, w, slices).to(beta)
 
     results = dict(
         patient_id=patient_id,
-        ktrans=ktrans,
-        kep=kep,
+        ktrans=ktrans_map,
+        kep=kep_map,
         t0=t0,
         ct=ct,
-        error=error,
+        error=error_map,
         t2w=t2w
     )
     if aif == 'mixed':
-        results['beta'] = beta
+        results['beta'] = beta_map
 
     for k, v in results.items():
         if isinstance(v, torch.Tensor):
@@ -208,7 +234,6 @@ if __name__ == '__main__':
     args = parse_args()
     cfg = Config.fromfile(args.config)
     cfg['checkpoint'] = args.checkpoint
-    cfg['max_iter'] = args.max_iter
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
@@ -226,7 +251,7 @@ if __name__ == '__main__':
         args.save_path = f'{cfg.work_dir}/results-{timestamp}/'
 
     logger.info(f'Save results to {args.save_path}')
-    for idx, dce_dir in enumerate(find_image_dirs.find_dce_folders('data/test-data')):
+    for idx, dce_dir in enumerate(find_image_dirs.find_dce_folders(args.data)):
         patient_id, exp_date = dce_dir.split(os.sep)[-3:-1]
         histopathology_dir = find_image_dirs.find_histopathology(patient_id, exp_date)
 
@@ -248,13 +273,10 @@ if __name__ == '__main__':
         for aif in ['mixed', 'parker', 'weinmann']:
             logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
 
-            try:
-                results = process_patient(cfg, dce_dir, aif=aif)
-            except:
-                continue
-
+            # get our results
+            results = process_patient(cfg, dce_dir, aif=aif, max_iter=250, max_lr=5e-3)
             if results is None:
-                logger.warn(f'Patient {patient_id} result is.')
+                logger.warn(f'Patient {patient_id} result is .')
                 continue
             t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
             t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
@@ -269,15 +291,27 @@ if __name__ == '__main__':
                 beta = None
 
             example_dcm = read_dicoms(dce_dir)[:20]
-            save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF')
-            save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF')
-            save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF')
+            save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-ours')
+            save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-ours')
+            save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-ours')
             if beta is not None:
-                save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta')
+                save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-ours')
                 beta = normalize(beta, upper_bound=1)
                 if aif == 'mixed':
                     ktrans_x_beta = ktrans * beta.exp()
-                    save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta')
+                    save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-ours')
+
+            # get NLLS results
+            results = process_patient(cfg, dce_dir, aif=aif, init='random', max_iter=150, max_lr=1e-2)
+            save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-NLLS')
+            save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-NLLS')
+            save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-NLLS')
+            if beta is not None:
+                save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-NLLS')
+                beta = normalize(beta, upper_bound=1)
+                if aif == 'mixed':
+                    ktrans_x_beta = ktrans * beta.exp()
+                    save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-NLLS')
 
         dst = osp.join(f'{args.save_path}/{patient_id}', 'histopathology')
         if not osp.isdir(histopathology_dir):
@@ -288,5 +322,3 @@ if __name__ == '__main__':
         for d in iCAD_Ktrans_dir:
             dst = osp.join(f'{args.save_path}/{patient_id}', d.split(os.sep)[-1])
             shutil.copytree(d, dst)
-        if idx >= 4:
-            break
