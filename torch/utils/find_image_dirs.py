@@ -4,16 +4,22 @@ import os.path as osp
 from datetime import datetime
 
 
+
+def find_patients(folder):
+    return [f for f in glob(f"{folder}/*1_*", recursive=True) if re.search(r'1_[\w\d]{8}$', f)]
+
+
 def find_dce_folders(path):
     assert osp.isdir(path)
-    patients = [osp.join(path, i) for i in os.listdir(path) if osp.isdir(osp.join(path, i))]
+    patients = find_patients(path)
     exps = []
     for p in patients:
         exps1 = [osp.join(p, i) for i in os.listdir(p) if osp.isdir(osp.join(p, i))]
         exps.extend(exps1)
+
     dce_folders = []
     for exp in exps:
-        candidates = [osp.join(exp, i) for i in os.listdir(exp) if 'iCAD-MCC_' in i or 'DCAD-MCC-DYN' in i or 't1_twist_tra' in i or 'Twist_dynamic' in i]
+        candidates = [osp.join(exp, i) for i in os.listdir(exp) if 'iCAD-MCC_' in i or 'DCAD-MCC-DYN' in i or 't1_twist_tra' in i or 'Twist_dynamic' in i and "TT=" not in i]
         if len(candidates) > 1:
             if len(candidates) == 2:
                 if any(['MCC' in i for i in candidates]):
@@ -45,6 +51,19 @@ def find_ktrans_folder(path):
         return None
 
 
+def find_osirixsr(path):
+    path = osp.abspath(path)
+    assert osp.isdir(path), path
+    candidates = glob(f"{path}/OsiriX_ROI_SR*/")
+    if len(candidates) == 0:
+        warnings.warn(f"Cannot find Osirix_SR in {path}")
+        c = None
+    else:
+        if len(candidates) >= 2:
+            warnings.warn(f"Find multiple Osirix_SR in {path}, use the first one {candidates[0]}")
+        c = candidates[0]
+    return c
+
 def find_t2_folder(path):
     path = osp.abspath(path)
     assert osp.isdir(path)
@@ -68,8 +87,12 @@ def find_icad_ktrans(path):
     assert osp.isdir(path)
     candidates = [i for i in os.listdir(path) if osp.isdir(osp.join(path, i))]
     candidates = [osp.join(path, i) for i in candidates if ('icad' in i.lower() or 'dcad' in i.lower()) and ('ktrans' in i.lower() or 'perm' in i.lower())]
+    # select the one with MCC
     if len(candidates) >= 1 and any(['mcc' in c.lower() for c in candidates]):
         candidates = [c for c in candidates if 'mcc' in c.lower()]
+    # select the one without CLR
+    if len(candidates) >= 1 and any(['clr' not in c.lower() for c in candidates]):
+        candidates = [c for c in candidates if 'clr' not in c.lower()]
     return candidates if len(candidates) > 0 else None
 
 
