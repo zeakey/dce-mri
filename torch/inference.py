@@ -165,9 +165,7 @@ def process_patient(cfg, dce_dir, init='nn', refine=True, aif=None, max_iter=100
 
         if aif == 'mixed':
             beta = beta.requires_grad_()
-            optimizer = torch.optim.RMSprop(params=[{'params': [ktrans, kep, t0], 'lr': 1e-1}, {'params': [beta], 'lr': 1e-3}])
-            optimizer.param_groups[0]['lr_factor'] = 1
-            optimizer.param_groups[1]['lr_factor'] = 1e2
+            optimizer = torch.optim.RMSprop(params=[{'params': [ktrans, kep, t0], 'lr_factor': 1}, {'params': [beta], 'lr_factor': 1e2}])
         else:
             optimizer = torch.optim.RMSprop(params=[ktrans, kep, t0], lr=1e-3)
             optimizer.param_groups[0]['lr_factor'] = 1
@@ -209,7 +207,7 @@ def process_patient(cfg, dce_dir, init='nn', refine=True, aif=None, max_iter=100
 
     if aif == 'mixed':
         beta_map = torch.zeros(h, w, slices).to(ktrans)
-        beta_map = torch.zeros(h, w, slices).to(beta)
+        beta_map[mask] = beta
 
     results = dict(
         patient_id=patient_id,
@@ -296,7 +294,6 @@ if __name__ == '__main__':
             save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-ours')
             if beta is not None:
                 save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-ours')
-                beta = normalize(beta, upper_bound=1)
                 if aif == 'mixed':
                     ktrans_x_beta = ktrans * beta.exp()
                     save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-ours')
