@@ -272,7 +272,7 @@ if __name__ == '__main__':
             logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
 
             # get our results
-            results = process_patient(cfg, dce_dir, aif=aif, max_iter=250, max_lr=5e-3)
+            results = process_patient(cfg, dce_dir, aif=aif, max_iter=500, max_lr=5e-3)
             if results is None:
                 logger.warn(f'Patient {patient_id} result is .')
                 continue
