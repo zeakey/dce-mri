@@ -272,7 +272,7 @@ if __name__ == '__main__':
             logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
 
             # get our results
-            results = process_patient(cfg, dce_dir, aif=aif, max_iter=500, max_lr=5e-3)
+            results = process_patient(cfg, dce_dir, aif=aif, max_iter=120, max_lr=5e-3)
             if results is None:
                 logger.warn(f'Patient {patient_id} result is .')
                 continue
@@ -299,7 +299,7 @@ if __name__ == '__main__':
                     save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-ours')
 
             # get NLLS results
-            results = process_patient(cfg, dce_dir, aif=aif, init='random', max_iter=150, max_lr=1e-2)
+            results = process_patient(cfg, dce_dir, aif=aif, init='random', max_iter=100, max_lr=1e-2)
             save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-NLLS')
             save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-NLLS')
             save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-NLLS')
@@ -307,7 +307,7 @@ if __name__ == '__main__':
                 save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-NLLS')
                 beta = normalize(beta, upper_bound=1)
                 if aif == 'mixed':
-                    ktrans_x_beta = ktrans * beta.exp()
+                    ktrans_x_beta = ktrans * beta
                     save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-NLLS')
 
         dst = osp.join(f'{args.save_path}/{patient_id}', 'histopathology')
