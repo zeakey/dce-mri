@@ -39,7 +39,7 @@ from pharmacokinetic import calculate_reconstruction_loss
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train a segmentor')
+    parser = argparse.ArgumentParser(description='DCE inference')
     parser.add_argument('data', help='data path')
     parser.add_argument('config', help='train config file path')
     parser.add_argument('checkpoint', help='checkpoint weights')
@@ -86,31 +86,34 @@ def save2dicom(array, save_dir, example_dicom, description, **kwargs):
         **kwargs)
 
 
-def process_patient(cfg, dce_dir, init='nn', refine=True, aif=None, max_iter=100, max_lr=1e-3, min_lr=1e-6):
+def process_patient(cfg, dce_data, init='nn', refine=True, aif=None, max_iter=100, max_lr=1e-3, min_lr=1e-6):
     if aif == None:
         aif = cfg.aif
 
     assert init in ['nn', 'random']
+    if not isinstance(dce_data, dict):
+        raise RuntimeError(type(dce_data))
 
-    patient_id = dce_dir.split(os.sep)[-3]
-    study_dir = osp.join(dce_dir, '../')
-    cad_ktrans_dir = find_image_dirs.find_ktrans_folder(study_dir)
-    t2_dir = find_image_dirs.find_t2_folder(study_dir)
+    # patient_id = dce_dir.split(os.sep)[-3]
+    # study_dir = osp.join(dce_dir, '../')
+    # cad_ktrans_dir = find_image_dirs.find_ktrans_folder(study_dir)
+    # t2_dir = find_image_dirs.find_t2_folder(study_dir)
 
-    if cad_ktrans_dir and t2_dir and osirixsr_dir:
-        t2w = read_dicoms(t2_dir)
-        cad_ktrans = read_dicoms(cad_ktrans_dir)
-    else:
-        logger.warn(f"{patient_id}: cannot find t2w or cad_ktrans, pass")
-        return None
-    try:
-        dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
-    except Exception as e:
-        logger.warn(f"Cannot load DCE data from {dce_dir}: {e}")
-        return None
+    # if cad_ktrans_dir and t2_dir and osirixsr_dir:
+    #     # t2w = read_dicoms(t2_dir)
+    #     cad_ktrans = read_dicoms(cad_ktrans_dir)
+    # else:
+    #     logger.warn(f"{patient_id}: cannot find t2w or cad_ktrans, pass")
+    #     return None
+    # try:
+    #     dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
+    # except Exception as e:
+    #     logger.warn(f"Cannot load DCE data from {dce_dir}: {e}")
+    #     return None
 
     # get the mask determining which voxels will be processed
     # time series whose maximal value is less then 1/100 times the global maximum will be ignored
+
     ct = dce_data['ct'].to(cfg.device)
     h, w, slices, frames = ct.shape
     mask = ct.max(dim=-1).values >= ct.max(dim=-1).values.max() / 100
@@ -193,7 +196,7 @@ def process_patient(cfg, dce_dir, init='nn', refine=True, aif=None, max_iter=100
             if aif == 'mixed':
                 beta.data.clamp_(0, 1)
             if (i+1) % 10 == 0:
-                logger.info(f"{patient_id}: [{i+1:03d}/{max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
+                logger.info(f"[{i+1:03d}/{max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
 
     ktrans_map = torch.zeros(h, w, slices).to(ktrans)
     kep_map = torch.zeros(h, w, slices).to(ktrans)
@@ -210,13 +213,12 @@ def process_patient(cfg, dce_dir, init='nn', refine=True, aif=None, max_iter=100
         beta_map[mask] = beta
 
     results = dict(
-        patient_id=patient_id,
         ktrans=ktrans_map,
         kep=kep_map,
         t0=t0,
         ct=ct,
         error=error_map,
-        t2w=t2w
+        # t2w=t2w
     )
     if aif == 'mixed':
         results['beta'] = beta_map
@@ -254,10 +256,18 @@ if __name__ == '__main__':
         histopathology_dir = find_image_dirs.find_histopathology(patient_id, exp_date)
 
         study_dir = osp.abspath(osp.join(dce_dir, '../'))
+        t2_dir = find_image_dirs.find_t2_folder(study_dir)
         iCAD_Ktrans_dir = find_image_dirs.find_icad_ktrans(study_dir)
         osirixsr_dir = find_image_dirs.find_osirixsr(study_dir)
 
-        if histopathology_dir is None or iCAD_Ktrans_dir is None or osirixsr_dir is None:
+        # try to load dce-mri data
+        try:
+            dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
+        except Exception as e:
+            logger.warn(f"{patient_id}: cannot load DCE data from {dce_dir}: {e}")
+            continue
+
+        if histopathology_dir is None or iCAD_Ktrans_dir is None or osirixsr_dir is None or t2_dir is None:
             if histopathology_dir:
                 logger.warn(f"{patient_id}: cannot find histopathology")
             if iCAD_Ktrans_dir:
@@ -272,13 +282,11 @@ if __name__ == '__main__':
             logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
 
             # get our results
-            results = process_patient(cfg, dce_dir, aif=aif, max_iter=120, max_lr=5e-3)
+            results = process_patient(cfg, dce_data, aif=aif, max_iter=120, max_lr=5e-3)
             if results is None:
                 logger.warn(f'Patient {patient_id} result is .')
                 continue
-            t2w = torch.from_numpy(np.concatenate([i.pixel_array[:, :, None] for i in results['t2w']], axis=-1).astype(np.float32))
-            t2w = torch.nn.functional.interpolate(rearrange(t2w, "h w c -> 1 c h w"), size=(160, 160))
-            t2w = rearrange(t2w, '1 c h w -> h w c').numpy()
+
             ct = results['ct']
             ktrans = results['ktrans']
             kep = results['kep']
@@ -299,7 +307,7 @@ if __name__ == '__main__':
                     save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-ours')
 
             # get NLLS results
-            results = process_patient(cfg, dce_dir, aif=aif, init='random', max_iter=100, max_lr=1e-2)
+            results = process_patient(cfg, dce_data, aif=aif, init='random', max_iter=100, max_lr=1e-2)
             save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-NLLS')
             save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-NLLS')
             save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-NLLS')
@@ -314,6 +322,9 @@ if __name__ == '__main__':
         if not osp.isdir(histopathology_dir):
             print('?')
         shutil.copytree(histopathology_dir, dst, dirs_exist_ok=True)
+
+        dst = osp.join(f'{args.save_path}/{patient_id}', t2_dir.split(os.sep)[-1])
+        shutil.copytree(t2_dir, dst, dirs_exist_ok=True)
 
         shutil.copytree(osirixsr_dir, osp.join(f'{args.save_path}/{patient_id}', 'OSIRIX_SR'), dirs_exist_ok=True)
         for d in iCAD_Ktrans_dir:
