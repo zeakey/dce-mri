@@ -257,7 +257,7 @@ if __name__ == '__main__':
 
         study_dir = osp.abspath(osp.join(dce_dir, '../'))
         t2_dir = find_image_dirs.find_t2_folder(study_dir)
-        iCAD_Ktrans_dir = find_image_dirs.find_icad_ktrans(study_dir)
+        dynacad_dirs = find_image_dirs.find_dynacad(study_dir, include_clr=True)
         osirixsr_dir = find_image_dirs.find_osirixsr(study_dir)
 
         # try to load dce-mri data
@@ -267,11 +267,11 @@ if __name__ == '__main__':
             logger.warn(f"{patient_id}: cannot load DCE data from {dce_dir}: {e}")
             continue
 
-        if histopathology_dir is None or iCAD_Ktrans_dir is None or osirixsr_dir is None or t2_dir is None:
+        if histopathology_dir is None or dynacad_dirs is None or osirixsr_dir is None or t2_dir is None:
             if histopathology_dir:
                 logger.warn(f"{patient_id}: cannot find histopathology")
-            if iCAD_Ktrans_dir:
-                logger.warn(f"{patient_id}: cannot find iCAD_Ktrans_dir")
+            if dynacad_dirs:
+                logger.warn(f"{patient_id}: cannot find dynacad_dirs")
             continue
 
         if osp.isdir(f'{args.save_path}/{patient_id}'):
@@ -303,20 +303,29 @@ if __name__ == '__main__':
             if beta is not None:
                 save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-ours')
                 if aif == 'mixed':
-                    ktrans_x_beta = ktrans * beta.exp()
+                    ktrans_x_beta = ktrans * beta
                     save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-ours')
+                    #
+                    ktrans_x_beta = ktrans * beta.exp()
+                    save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-betaexp-ours')
 
             # get NLLS results
             results = process_patient(cfg, dce_data, aif=aif, init='random', max_iter=100, max_lr=1e-2)
             save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-NLLS')
             save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-NLLS')
             save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-NLLS')
-            if beta is not None:
-                save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-NLLS')
-                beta = normalize(beta, upper_bound=1)
-                if aif == 'mixed':
-                    ktrans_x_beta = ktrans * beta
-                    save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-NLLS')
+            # if beta is not None:
+            #     save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-NLLS')
+            #     beta = normalize(beta, upper_bound=1)
+            #     if aif == 'mixed':
+            #         ktrans_x_beta = ktrans * beta
+            #         save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-NLLS')
+
+            # get Ottens results
+            results = process_patient(cfg, dce_data, aif=aif, init='random', max_iter=50, max_lr=1e-2)
+            save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-Ottens')
+            save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-Ottens')
+            save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-Ottens')
 
         dst = osp.join(f'{args.save_path}/{patient_id}', 'histopathology')
         if not osp.isdir(histopathology_dir):
@@ -327,6 +336,6 @@ if __name__ == '__main__':
         shutil.copytree(t2_dir, dst, dirs_exist_ok=True)
 
         shutil.copytree(osirixsr_dir, osp.join(f'{args.save_path}/{patient_id}', 'OSIRIX_SR'), dirs_exist_ok=True)
-        for d in iCAD_Ktrans_dir:
+        for d in dynacad_dirs:
             dst = osp.join(f'{args.save_path}/{patient_id}', d.split(os.sep)[-1])
             shutil.copytree(d, dst)

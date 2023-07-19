@@ -82,7 +82,7 @@ def find_t2_folder(path):
         return None
 
 
-def find_icad_ktrans(path):
+def find_dynacad(path, include_clr=False):
     path = osp.abspath(path)
     assert osp.isdir(path)
     candidates = [i for i in os.listdir(path) if osp.isdir(osp.join(path, i))]
@@ -90,10 +90,11 @@ def find_icad_ktrans(path):
     # select the one with MCC
     if len(candidates) >= 1 and any(['mcc' in c.lower() for c in candidates]):
         candidates = [c for c in candidates if 'mcc' in c.lower()]
+
     # select the one without CLR
-    if len(candidates) >= 1 and any(['clr' not in c.lower() for c in candidates]):
+    if len(candidates) >= 1 and any(['clr' not in c.lower() for c in candidates]) and (not include_clr):
         candidates = [c for c in candidates if 'clr' not in c.lower()]
-    return candidates if len(candidates) > 0 else None
+    return candidates
 
 
 def find_histopathology(patient_id, exp_date):
