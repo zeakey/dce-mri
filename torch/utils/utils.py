@@ -127,18 +127,32 @@ def spatial_loss(data, uncertainty, r=3, alpha=-0.1):
 
 
 # model related
-def inference(model, data, convert2cpu=False):
-    assert data.ndim == 5 or data.ndim == 4, data.shape
+def inference(model, data, batchsize=256, convert2cpu=False):
+    assert data.ndim == 5 or data.ndim == 4 or data.ndim == 2, data.shape
     if data.ndim == 4:
-        data = data.unsqueeze(dim=-1)
+        # h w slices frames
+        h, w, slices, frames = data.shape
+        output_shape = [h, w, slices]
+        data = data.reshape(h*w*slices, frames, 1)
+    elif data.ndim == 5:
+        # h w slices frames 1
+        assert data.size(-1) == 5
+        h, w, slices, frames, _ = data.shape
+        output_shape = [h, w, slices]
+        data = data.reshape(h*w*slices, frames, 1)
+    elif data.ndim == 2:
+        n, frames = data.shape
+        output_shape = [n]
+        data = data.reshape(-1, frames, 1)
+    chunks = math.ceil(data.size(0) / batchsize)
+    data = data.chunk(dim=0, chunks=chunks)
     model.eval()
 
     output = OrderedDict()
     for k in model.output_keys:
         output[k] = []
 
-    h, w, s, f, d = data.shape
-    data = rearrange(data, 'h w s f d -> h (w s) f d')
+    
 
     print('Start inference...')
     tic = time.time()
@@ -151,8 +165,6 @@ def inference(model, data, convert2cpu=False):
     for k in model.output_keys:
         output[k] = torch.cat(output[k], dim=0)
     for k in model.output_keys:
-        output[k] = output[k].view(h, w, s)
+        output[k] = output[k].view(*output_shape)
     print('Done, %.3fs elapsed.' % (toc-tic))
     return output
-
-

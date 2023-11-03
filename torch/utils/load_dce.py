@@ -9,7 +9,7 @@ from pharmacokinetic import find_max_base, gd_concentration
 
 
 def load_dce_data(folder, shift_max_base=False, device=torch.device('cpu')):
-    assert len([i for i in os.listdir(folder) if osp.isfile(osp.join(folder, i))]) == 20*75, osp.abspath(folder)
+    dicoms = [i for i in os.listdir(folder) if osp.isfile(osp.join(folder, i))]
     if folder.endswith(os.sep):
         folder = folder[:-1]
     patient = folder.split(os.sep)[-3]
@@ -66,6 +66,10 @@ def load_dce_data(folder, shift_max_base=False, device=torch.device('cpu')):
         metadata=metadata)
 
 
+def parse_acquisition_time(acquisition_time):
+    return 60 * (float(acquisition_time[0:2]) * 60 + float(acquisition_time[2:4])) + float(acquisition_time[4:])
+
+
 def read_dce_dicoms(folder):
     dicoms = sorted([osp.join(folder, i) for i in os.listdir(folder) if i.endswith('dcm') or i.endswith('dicom')])
     flip_angle = []
@@ -75,13 +79,22 @@ def read_dce_dicoms(folder):
     for d in tqdm(dicoms):
         ds = pydicom.dcmread(d)
         data.append(ds.pixel_array)
-        acquisition_time.append(60 * (float(ds.AcquisitionTime[0:2]) * 60 + float(ds.AcquisitionTime[2:4])) + float(ds.AcquisitionTime[4:]))
+        acquisition_time.append(parse_acquisition_time(ds.AcquisitionTime))
         flip_angle.append(float(ds.FlipAngle))
         repetition_time.append(float(ds.RepetitionTime))
-    acquisition_time = np.array(acquisition_time).reshape(75, 20)[:, 0]
+    num_frames = len(np.unique(acquisition_time))
+    num_slices = len(acquisition_time) // num_frames
+    acquisition_time = np.array(acquisition_time).reshape(num_frames, num_slices)[:, 0]
     data = np.stack(data, axis=-1)
     h, w, _ = data.shape
-    data = rearrange(data, 'h w (frames slices) -> h w slices frames', h=h, w=w, slices=20, frames=75)
+    data = rearrange(data, 'h w (frames slices) -> h w slices frames', h=h, w=w, slices=num_slices, frames=num_frames)
     flip_angle = np.array(flip_angle)
     repetition_time = np.array(repetition_time)
-    return dict(data=data, flip_angle=flip_angle, repetition_time=repetition_time, acquisition_time=acquisition_time)
+    return dict(
+        data=data,
+        flip_angle=flip_angle,
+        repetition_time=repetition_time,
+        acquisition_time=acquisition_time,
+        frames=num_frames,
+        slices=num_slices
+    )

@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import vlkit.plt as vlplt
 
+from prettytable import PrettyTable
 from collections import OrderedDict
 
 import torch
@@ -19,7 +20,7 @@ from einops import rearrange
 
 import mmcv
 from vlkit.image import normalize
-from vlkit.dicom.dicomio import read_dicoms
+from vlkit.medical import read_dicoms
 from vlkit.lrscheduler import CosineScheduler, MultiStepScheduler
 from vlkit.utils import   get_logger
 
@@ -44,6 +45,7 @@ def parse_args():
     parser.add_argument('config', help='train config file path')
     parser.add_argument('checkpoint', help='checkpoint weights')
     parser.add_argument('--max-iter', type=int, default=50)
+    parser.add_argument('--max-lr', type=float, default=1e-2)
     parser.add_argument('--save-path', type=str, default='/tmp/dce-mri')
     parser.add_argument(
         '--cfg-options',
@@ -72,6 +74,21 @@ def rel_loss(x, y):
     print('l: ', l.min(), l.max(), 's: ', s.min(), s.max(), 'div: ', (l / s).min(), (l / s).max())
     return (l / s).mean()
 
+
+def save_resuls_to_dicoms(results, method, aif, saveto, example_dcm):
+    save2dicom(results['ktrans'], save_dir=f'{saveto}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-{method}')
+    # save2dicom(results['kep'], save_dir=f'{saveto}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-{method}')
+    # save2dicom(results['error'], save_dir=f'{saveto}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-{method}')
+    if 'beta' in results and results['beta'] is not None:
+        save2dicom(results['beta'], save_dir=f'{saveto}/{patient_id}', example_dicom=example_dcm, description=f'beta-{method}')
+        if aif == 'mixed':
+            ktrans_x_beta = results['ktrans'] * results['beta']
+            save2dicom(ktrans_x_beta, save_dir=f'{saveto}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-x-beta-{method}')
+            #
+            ktrans_x_beta = results['ktrans'] * results['beta'].exp()
+            save2dicom(ktrans_x_beta, save_dir=f'{saveto}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-x-betaexp-{method}')
+
+
 def save2dicom(array, save_dir, example_dicom, description, **kwargs):
     SeriesNumber = int(str(str2int(description))[-12:])
     SeriesInstanceUID = str(SeriesNumber)
@@ -86,7 +103,7 @@ def save2dicom(array, save_dir, example_dicom, description, **kwargs):
         **kwargs)
 
 
-def process_patient(cfg, dce_data, init='nn', refine=True, aif=None, max_iter=100, max_lr=1e-3, min_lr=1e-6):
+def process_patient(cfg, dce_data, init='random', refine=True, aif=None, max_iter=100, max_lr=1e-2, min_lr=1e-5):
     if aif == None:
         aif = cfg.aif
 
@@ -94,29 +111,9 @@ def process_patient(cfg, dce_data, init='nn', refine=True, aif=None, max_iter=10
     if not isinstance(dce_data, dict):
         raise RuntimeError(type(dce_data))
 
-    # patient_id = dce_dir.split(os.sep)[-3]
-    # study_dir = osp.join(dce_dir, '../')
-    # cad_ktrans_dir = find_image_dirs.find_ktrans_folder(study_dir)
-    # t2_dir = find_image_dirs.find_t2_folder(study_dir)
-
-    # if cad_ktrans_dir and t2_dir and osirixsr_dir:
-    #     # t2w = read_dicoms(t2_dir)
-    #     cad_ktrans = read_dicoms(cad_ktrans_dir)
-    # else:
-    #     logger.warn(f"{patient_id}: cannot find t2w or cad_ktrans, pass")
-    #     return None
-    # try:
-    #     dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
-    # except Exception as e:
-    #     logger.warn(f"Cannot load DCE data from {dce_dir}: {e}")
-    #     return None
-
-    # get the mask determining which voxels will be processed
-    # time series whose maximal value is less then 1/100 times the global maximum will be ignored
-
     ct = dce_data['ct'].to(cfg.device)
     h, w, slices, frames = ct.shape
-    mask = ct.max(dim=-1).values >= ct.max(dim=-1).values.max() / 100
+    mask = ct.max(dim=-1).values >= ct.max(dim=-1).values.max() / 50
     N = mask.sum()
     data = ct[mask]
 
@@ -128,7 +125,7 @@ def process_patient(cfg, dce_data, init='nn', refine=True, aif=None, max_iter=10
         tic = time.time()
         output = inference(model, data)
         toc = time.time()
-        logger.info('%.2f seconds' % (toc-tic))
+        logger.info(f'NN inference ({mask.sum().item()} voxels) takes {toc-tic:.3f} seconds')
         del model
 
         ktrans = output['ktrans']
@@ -176,9 +173,9 @@ def process_patient(cfg, dce_data, init='nn', refine=True, aif=None, max_iter=10
         aif_t = aif_t.to(ktrans)
         data = data.to(ktrans)
 
-        # scheduler = CosineScheduler(epoch_iters=max_iter, epochs=1, warmup_iters=0, max_lr=max_lr, min_lr=min_lr)
-        scheduler = MultiStepScheduler(iters=max_iter, gamma=0.1, milestones=[int(max_iter*3/4), int(max_iter*7/8)], base_lr=max_lr)
+        scheduler = MultiStepScheduler(gammas=0.1, milestones=[int(max_iter*3/4), int(max_iter*7/8)], base_lr=max_lr)
 
+        tic = time.time()
         for i in range(max_iter):
             if aif == 'mixed':
                 aif_cp = interp_aif(parker_aif, weinmann_aif, beta)
@@ -196,7 +193,8 @@ def process_patient(cfg, dce_data, init='nn', refine=True, aif=None, max_iter=10
             if aif == 'mixed':
                 beta.data.clamp_(0, 1)
             if (i+1) % 10 == 0:
-                logger.info(f"[{i+1:03d}/{max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
+                logger.info(f"{aif} AIF [{i+1:03d}/{max_iter:03d}] lr={lr:.2e} loss={loss.item():.5f}")
+        logger.info(f"Refine ({mask.sum().item()} voxels) takes {time.time()-tic:.3f} second.")
 
     ktrans_map = torch.zeros(h, w, slices).to(ktrans)
     kep_map = torch.zeros(h, w, slices).to(ktrans)
@@ -217,6 +215,7 @@ def process_patient(cfg, dce_data, init='nn', refine=True, aif=None, max_iter=10
         kep=kep_map,
         t0=t0,
         ct=ct,
+        loss=loss.mean().item(),
         error=error_map,
         # t2w=t2w
     )
@@ -255,87 +254,57 @@ if __name__ == '__main__':
         patient_id, exp_date = dce_dir.split(os.sep)[-3:-1]
         histopathology_dir = find_image_dirs.find_histopathology(patient_id, exp_date)
 
+        table = PrettyTable()
         study_dir = osp.abspath(osp.join(dce_dir, '../'))
         t2_dir = find_image_dirs.find_t2_folder(study_dir)
         dynacad_dirs = find_image_dirs.find_dynacad(study_dir, include_clr=True)
         osirixsr_dir = find_image_dirs.find_osirixsr(study_dir)
 
-        # try to load dce-mri data
-        try:
-            dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
-        except Exception as e:
-            logger.warn(f"{patient_id}: cannot load DCE data from {dce_dir}: {e}")
-            continue
-
-        if histopathology_dir is None or dynacad_dirs is None or osirixsr_dir is None or t2_dir is None:
-            if histopathology_dir:
-                logger.warn(f"{patient_id}: cannot find histopathology")
-            if dynacad_dirs:
-                logger.warn(f"{patient_id}: cannot find dynacad_dirs")
-            continue
-
         if osp.isdir(f'{args.save_path}/{patient_id}'):
             logger.info(f'{args.save_path}/{patient_id} exists, pass.')
             continue
 
-        for aif in ['mixed', 'parker', 'weinmann']:
-            logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
+        # try to load dce-mri data
+        try:
+            dce_data = load_dce.load_dce_data(dce_dir, device=cfg.device)
+        except Exception as e:
+            logger.warn(f"{dce_dir}: cannot load DCE data from {dce_dir}: {e}")
+            logger.error(e)
+            continue
 
+        if histopathology_dir is None:
+            logger.warn(f"{patient_id}: cannot find histopathology")
+        if dynacad_dirs is None:
+            logger.warn(f"{patient_id}: cannot find dynacad_dirs")
+
+        table_data = {}
+        for aif in ['mixed', "parker", "weinmann"]:
+            logger.info(f"Process patient {patient_id}/{exp_date} with {aif} AIF")
+            example_dcm = read_dicoms(dce_dir)[:dce_data['ct'].shape[-2]]
             # get our results
-            results = process_patient(cfg, dce_data, aif=aif, max_iter=120, max_lr=5e-3)
+            logger.info(f'{patient_id}: get our results')
+            results = process_patient(cfg, dce_data, aif=aif, max_iter=200, max_lr=args.max_lr)
+            table_data[f'ours-{aif}'] = results['loss']
+
             if results is None:
                 logger.warn(f'Patient {patient_id} result is .')
                 continue
-
-            ct = results['ct']
-            ktrans = results['ktrans']
-            kep = results['kep']
-            error = results['error']
-            if 'beta' in results:
-                beta = results['beta']
-            else:
-                beta = None
-
-            example_dcm = read_dicoms(dce_dir)[:20]
-            save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-ours')
-            save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-ours')
-            save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-ours')
-            if beta is not None:
-                save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-ours')
-                if aif == 'mixed':
-                    ktrans_x_beta = ktrans * beta
-                    save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-ours')
-                    #
-                    ktrans_x_beta = ktrans * beta.exp()
-                    save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-betaexp-ours')
+            save_resuls_to_dicoms(results=results, aif=aif, method='ours', saveto=args.save_path, example_dcm=example_dcm)
 
             # get NLLS results
-            results = process_patient(cfg, dce_data, aif=aif, init='random', max_iter=100, max_lr=1e-2)
-            save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-NLLS')
-            save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-NLLS')
-            save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-NLLS')
-            # if beta is not None:
-            #     save2dicom(beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='beta-NLLS')
-            #     beta = normalize(beta, upper_bound=1)
-            #     if aif == 'mixed':
-            #         ktrans_x_beta = ktrans * beta
-            #         save2dicom(ktrans_x_beta, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description='Ktrans-x-beta-NLLS')
+            logger.info(f'{patient_id}: get NLLS results')
+            results = process_patient(cfg, dce_data, aif=aif, init='random', max_iter=80, max_lr=args.max_lr)
+            save_resuls_to_dicoms(results=results, aif=aif, method='NLLS', saveto=args.save_path, example_dcm=example_dcm)
+            table_data[f'NLLS-{aif}'] = results['loss']
+        for k, v in table_data.items():
+            table.add_column(k, [v])
+        logger.info(table)
 
-            # get Ottens results
-            results = process_patient(cfg, dce_data, aif=aif, init='random', max_iter=50, max_lr=1e-2)
-            save2dicom(ktrans, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-Ottens')
-            save2dicom(kep, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'kep-{aif}-AIF-Ottens')
-            save2dicom(error, save_dir=f'{args.save_path}/{patient_id}', example_dicom=example_dcm, description=f'error-{aif}-AIF-Ottens')
+        if histopathology_dir is not None:
+            dst = osp.join(f'{args.save_path}/{patient_id}', 'histopathology')
+            shutil.copytree(histopathology_dir, dst, dirs_exist_ok=True)
 
-        dst = osp.join(f'{args.save_path}/{patient_id}', 'histopathology')
-        if not osp.isdir(histopathology_dir):
-            print('?')
-        shutil.copytree(histopathology_dir, dst, dirs_exist_ok=True)
-
-        dst = osp.join(f'{args.save_path}/{patient_id}', t2_dir.split(os.sep)[-1])
-        shutil.copytree(t2_dir, dst, dirs_exist_ok=True)
-
-        shutil.copytree(osirixsr_dir, osp.join(f'{args.save_path}/{patient_id}', 'OSIRIX_SR'), dirs_exist_ok=True)
-        for d in dynacad_dirs:
-            dst = osp.join(f'{args.save_path}/{patient_id}', d.split(os.sep)[-1])
-            shutil.copytree(d, dst)
+        if dynacad_dirs is not None:
+            for d in dynacad_dirs:
+                dst = osp.join(f'{args.save_path}/{patient_id}', d.split(os.sep)[-1])
+                shutil.copytree(d, dst)
