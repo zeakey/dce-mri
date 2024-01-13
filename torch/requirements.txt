@@ -1,0 +1,7 @@
+torch==2.0.1
+mmcv==1.7.0
+prettytable==3.9.0
+vlkit @ git+https://github.com/vlkit/vlkit@main
+pydicom
+einops
+tqdm
