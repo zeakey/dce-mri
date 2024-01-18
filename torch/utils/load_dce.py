@@ -23,9 +23,11 @@ def load_dce_data(folder, shift_max_base=False, device=torch.device('cpu')):
     metadata['ContentDate'] = ds.ContentDate
     metadata['SOPClassUID'] = ds.SOPClassUID
     metadata['SOPInstanceUID'] = ds.SOPInstanceUID
-    metadata['StudyID'] = ds.StudyID
+    if hasattr(ds, "StudyID"):
+        metadata['StudyID'] = ds.StudyID
+    else:
+        metadata['StudyID'] = "Placeholder-studyID"
     metadata['StudyInstanceUID'] = ds.StudyInstanceUID
-
     data = read_dce_dicoms(folder)
     dce_data = torch.tensor(data['data'].astype(np.float32)).to(device)
     acquisition_time = torch.tensor(data['acquisition_time']).to(dce_data)
@@ -44,7 +46,6 @@ def load_dce_data(folder, shift_max_base=False, device=torch.device('cpu')):
 
         acquisition_time = acquisition_time[max_base:]
         interval = (acquisition_time[-1] - acquisition_time[0]) / (acquisition_time.numel() - 1)
-
         acquisition_time = torch.cat((acquisition_time, acquisition_time[-1] + torch.arange(1, max_base+1) * interval), dim=0)
         max_base = 0
 
