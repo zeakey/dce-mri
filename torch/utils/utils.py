@@ -8,6 +8,7 @@ from einops import rearrange
 from tqdm import tqdm
 from collections import OrderedDict
 from tofts import tofts
+from pydicom.uid import ExplicitVRLittleEndian
 
 from aif import parker_aif, biexp_aif
 
@@ -74,7 +75,7 @@ def write_dicom(array, filename, ds, **kwargs):
 
     ds.Rows = array.shape[0]
     ds.Columns = array.shape[1]
-
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
     if kwargs is not None:
         for k, v in kwargs.items():
             setattr(ds, k, v)
