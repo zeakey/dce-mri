@@ -4,9 +4,26 @@ import os.path as osp
 from datetime import datetime
 
 
-
 def find_patients(folder):
     return [f for f in glob(f"{folder}/*1_*", recursive=True) if re.search(r'1_[\w\d]{8}$', f)]
+
+
+def search_dce_folder(path):
+    candidates = [i for i in glob(f"{path}/**/", recursive = True) if 'iCAD-MCC_' in i or 'DCAD-MCC-DYN' in i or 't1_twist_tra' in i or 'Twist_dynamic' in i and "TT=" not in i]
+    dce_folder = None
+    if len(candidates) > 1:
+        if len(candidates) == 2:
+            if any(['MCC' in i for i in candidates]):
+                dce_folder = list(filter(lambda x: 'MCC' in x, candidates))[0]
+            else:
+                dce_folder = candidates[0]
+        else:
+            dce_folder = candidates[0]
+    elif len(candidates) == 1:
+        dce_folder = candidates[0]
+    else:
+        raise NameError(f"Couldn't find dce folder in {path}.")
+    return dce_folder
 
 
 def find_dce_folders(path):

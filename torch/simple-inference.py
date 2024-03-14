@@ -1,7 +1,6 @@
-
 import torch
 from prettytable import PrettyTable
-from vlkit.medical import read_dicoms
+from vlkit.io import read_dicoms
 from vlkit.lrscheduler import MultiStepScheduler
 from vlkit.utils import   get_logger
 import time, sys, argparse
@@ -10,6 +9,7 @@ from utils.utils import save_slices_to_dicom, str2int
 from aif import get_aif, interp_aif
 from pharmacokinetic import process_patient, evaluate_curve
 from utils.load_dce import load_dce_data
+from utils.find_image_dirs import search_dce_folder
 
 
 def parse_args():
@@ -36,16 +36,9 @@ def rel_loss(x, y):
     return (l / s).mean()
 
 
-def save_resuls_to_dicoms(results, method, aif, saveto, example_dcm):
-    save2dicom(results['ktrans'], save_dir=f'{saveto}/', example_dicom=example_dcm, description=f'Ktrans-{aif}-AIF-{method}')
-    if 'beta' in results and results['beta'] is not None:
-        save2dicom(results['beta'], save_dir=f'{saveto}/', example_dicom=example_dcm, description=f'beta-{method}')
-        if aif == 'mixed':
-            ktrans_x_beta = results['ktrans'] * results['beta']
-            save2dicom(ktrans_x_beta, save_dir=f'{saveto}/', example_dicom=example_dcm, description=f'Ktrans-x-beta-{method}')
-            #
-            ktrans_x_beta = results['ktrans'] * results['beta'].exp()
-            save2dicom(ktrans_x_beta, save_dir=f'{saveto}/', example_dicom=example_dcm, description=f'Ktrans-x-betaexp-{method}')
+def save_resuls_to_dicoms(results, saveto, example_dcm):
+    for k in ['ktrans', 'kep', 't0', 'beta']:
+        save2dicom(results[k], save_dir=f'{saveto}/', example_dicom=example_dcm, description=k)
 
 
 def save2dicom(array, save_dir, example_dicom, description, **kwargs):
@@ -141,7 +134,7 @@ def process_patient(dce_data: dict, aif: str, max_iter=100, max_lr=1e-2, min_lr=
     results = dict(
         ktrans=ktrans_map,
         kep=kep_map,
-        t0=t0,
+        t0=t0_map,
         ct=ct,
         loss=loss.mean().item(),
         error=error_map,
@@ -166,7 +159,10 @@ if __name__ == '__main__':
 
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     try:
-            dce_data = load_dce_data(args.data, device=device)
+        dce_dir = search_dce_folder(args.data)
+        print(dce_dir)
+        dce_data = load_dce_data(dce_dir, device=device)
+        example_dcm = read_dicoms(dce_dir)[:dce_data['ct'].shape[-2]]
     except Exception as e:
         logger.warn(f"{args.data}: cannot load DCE data from {args.data}: {e}")
         logger.error(e)
@@ -174,9 +170,8 @@ if __name__ == '__main__':
 
     table_data = {}
     table = PrettyTable()
-    for aif in ['mixed', "parker", "weinmann"]:
+    for aif in ['mixed']:
         logger.info(f"Process {args.data} with {aif} AIF")
-        example_dcm = read_dicoms(args.data)[:dce_data['ct'].shape[-2]]
         # get our results
         results = process_patient(dce_data, aif=aif, max_iter=args.max_iter, max_lr=args.max_lr)
         table_data[f'{aif}'] = results['loss']
@@ -184,7 +179,7 @@ if __name__ == '__main__':
         if results is None:
             logger.warn(f'{args.data}@{aif} AIF: result is empty.')
             continue
-        save_resuls_to_dicoms(results=results, aif=aif, method='Kai', saveto=args.save_path, example_dcm=example_dcm)
+        save_resuls_to_dicoms(results=results, saveto=args.save_path, example_dcm=example_dcm)
         logger.info(f"Results have been saved to {args.save_path}")
 
     for k, v in table_data.items():
