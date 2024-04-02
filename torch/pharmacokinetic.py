@@ -187,7 +187,10 @@ def find_max_base(ct):
     grad = torch.gradient(center)[0]
     max_grad_idx = grad.argmax()
     neg_grad_idx = torch.where(grad[:max_grad_idx] < 0)[0]
-    bnum = neg_grad_idx.max() + 1
+    if neg_grad_idx.numel() > 1:
+        bnum = neg_grad_idx.max() + 1
+    else:
+        bnum = 1
     baseline = center[:bnum+1].mean()
 
     while center[bnum+1] / baseline < 1.01:
