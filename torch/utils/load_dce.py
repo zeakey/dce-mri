@@ -12,7 +12,6 @@ def load_dce_data(folder, shift_max_base=False, device=torch.device('cpu')):
     dicoms = [i for i in os.listdir(folder) if osp.isfile(osp.join(folder, i))]
     if folder.endswith(os.sep):
         folder = folder[:-1]
-    patient = folder.split(os.sep)[-3]
     # metadata
     metadata = dict()
     ds = pydicom.dcmread(osp.join(folder, os.listdir(folder)[0]))
@@ -56,7 +55,6 @@ def load_dce_data(folder, shift_max_base=False, device=torch.device('cpu')):
     ct = gd_concentration(dce_data, max_base=0)
 
     return OrderedDict(
-        patient=patient,
         ct=ct,
         flip_angle=flip_angle,
         repetition_time=repetition_time,
