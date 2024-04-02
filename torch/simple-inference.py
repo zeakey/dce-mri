@@ -159,8 +159,10 @@ if __name__ == '__main__':
 
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     try:
-        dce_dir = search_dce_folder(args.data)
-        print(dce_dir)
+        # if the input folder directly contains dce images, we dont need to search
+        # otherwise we have to search DCE under the input folder
+        # dce_dir = search_dce_folder(args.data)
+        dce_dir = args.data
         dce_data = load_dce_data(dce_dir, device=device)
         example_dcm = read_dicoms(dce_dir)[:dce_data['ct'].shape[-2]]
     except Exception as e:
