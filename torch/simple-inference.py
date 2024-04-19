@@ -10,6 +10,9 @@ from aif import get_aif, interp_aif
 from pharmacokinetic import process_patient, evaluate_curve
 from utils.load_dce import load_dce_data
 from utils.find_image_dirs import search_dce_folder
+import matplotlib
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
 
 
 def parse_args():
@@ -18,6 +21,7 @@ def parse_args():
     parser.add_argument('--max-iter', type=int, default=50)
     parser.add_argument('--max-lr', type=float, default=1e-2)
     parser.add_argument('--save-path', type=str, default='/tmp/dce-mri')
+    parser.add_argument('--max-base', type=int, default=6)
     args = parser.parse_args()
     return args
 
@@ -61,11 +65,10 @@ def process_patient(dce_data: dict, aif: str, max_iter=100, max_lr=1e-2, min_lr=
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     ct = dce_data['ct']
     h, w, slices, frames = ct.shape
-    mask = ct.max(dim=-1).values >= ct.max(dim=-1).values.max() / 50
+    mask = ct.max(dim=-1).values >= ct.max(dim=-1).values.max() / 10
     N = mask.sum()
     data = ct[mask]
 
-    shape = dce_data['ct'].shape[:-1]
     ktrans = torch.rand(data.size(0)).to(device)
     kep = torch.rand(data.size(0)).to(ktrans)
     t0 = torch.rand(data.size(0)).to(ktrans)
@@ -73,12 +76,12 @@ def process_patient(dce_data: dict, aif: str, max_iter=100, max_lr=1e-2, min_lr=
         beta = torch.rand(data.size(0)).to(ktrans)
 
     if aif == 'mixed':
-        weinmann_aif, aif_t = get_aif(aif='weinmann', max_base=6, acquisition_time=dce_data['acquisition_time'], device=device)
-        parker_aif, _ = get_aif(aif='parker', max_base=6, acquisition_time=dce_data['acquisition_time'], device=device)
+        weinmann_aif, aif_t = get_aif(aif='weinmann', max_base=args.max_base, acquisition_time=dce_data['acquisition_time'], device=device)
+        parker_aif, _ = get_aif(aif='parker', max_base=args.max_base, acquisition_time=dce_data['acquisition_time'], device=device)
         beta = beta.squeeze(-1)
         aif_cp = interp_aif(parker_aif, weinmann_aif, beta=beta)
     else:
-        aif_cp, aif_t = get_aif(aif=aif, max_base=6, acquisition_time=dce_data['acquisition_time'], device=device)
+        aif_cp, aif_t = get_aif(aif=aif, max_base=args.max_base, acquisition_time=dce_data['acquisition_time'], device=device)
 
     logger.info("Start iterative refinement.")
     torch.cuda.empty_cache()
@@ -123,6 +126,9 @@ def process_patient(dce_data: dict, aif: str, max_iter=100, max_lr=1e-2, min_lr=
     t0_map = torch.zeros(h, w, slices).to(ktrans)
     error_map = torch.zeros(h, w, slices).to(ktrans)
 
+    ct_hat_mean = ct_hat.mean(dim=0)
+    ct_mean = data.mean(dim=0)
+
     ktrans_map[mask] = ktrans
     kep_map[mask] = kep
     t0_map[mask] = t0
@@ -136,6 +142,8 @@ def process_patient(dce_data: dict, aif: str, max_iter=100, max_lr=1e-2, min_lr=
         kep=kep_map,
         t0=t0_map,
         ct=ct,
+        ct_hat_mean=ct_hat_mean,
+        ct_mean=ct_mean,
         loss=loss.mean().item(),
         error=error_map,
         # t2w=t2w
@@ -182,6 +190,11 @@ if __name__ == '__main__':
             logger.warn(f'{args.data}@{aif} AIF: result is empty.')
             continue
         save_resuls_to_dicoms(results=results, saveto=args.save_path, example_dcm=example_dcm)
+        # plot
+        plt.plot(dce_data['acquisition_time'].cpu().numpy(), results['ct_mean'], color='black')
+        plt.plot(dce_data['acquisition_time'].cpu().numpy(), results['ct_hat_mean'], color='tab:orange')
+        plt.legend(["Data", "PK model"])
+        plt.savefig(osp.join(args.save_path, 'curves.jpg'))
         logger.info(f"Results have been saved to {args.save_path}")
 
     for k, v in table_data.items():
